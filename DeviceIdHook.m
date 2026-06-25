@@ -22,6 +22,21 @@
 static NSString *const kFakeDeviceId = @"00000000000000000000000000000000000000000000000000000000";
 static BOOL kSpoofEnabled = YES;
 
+
+
+static IMP orig_nsStringDeviceID;
+static id h_nsStringDeviceID(id self, SEL _cmd) {
+    id val = ((id(*)(id,SEL))orig_nsStringDeviceID)(self, _cmd);
+    hlog(@"FOUND", @"NSStringUtils", @"+deviceID → %@", val);
+    if (kSpoofEnabled) return kFakeDeviceId;
+    return val;
+}
+// constructor:
+hookClass(@"NSStringUtils", @selector(deviceID), &orig_nsStringDeviceID, (IMP)h_nsStringDeviceID);
+
+
+
+
 // PhotonIMUtils +deviceID — fake döndür
 static IMP orig_photonDeviceID;
 static id h_photonDeviceID(id self, SEL _cmd) {
