@@ -22,6 +22,21 @@
 static NSString *const kFakeDeviceId = @"00000000000000000000000000000000000000000000000000000000";
 static BOOL kSpoofEnabled = YES;
 
+// PhotonIMUtils +deviceID — fake döndür
+static IMP orig_photonDeviceID;
+static id h_photonDeviceID(id self, SEL _cmd) {
+    id val = ((id(*)(id,SEL))orig_photonDeviceID)(self, _cmd);
+    hlog(@"FOUND", @"PhotonIMUtils", @"+deviceID orijinal → %@", val);
+    if (kSpoofEnabled) {
+        hlog(@"SPOOF", @"PhotonIMUtils", @"+deviceID → fake");
+        return kFakeDeviceId;
+    }
+    return val;
+}
+
+// constructor içine ekle:
+hookClass(@"PhotonIMUtils", @selector(deviceID), &orig_photonDeviceID, (IMP)h_photonDeviceID);
+
 // ─── Log queue ───────────────────────────────────────────────────────────
 static dispatch_queue_t logQ(void) {
     static dispatch_queue_t q; static dispatch_once_t t;
