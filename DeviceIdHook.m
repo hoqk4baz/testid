@@ -1,7 +1,7 @@
 //
-//  DeviceIdHook.m  — Log + Spoof
+//  DeviceIdHook.m  — Log + Spoof (v3)
 //  com.farah.chat (Amar)
-//  Kaynak: Keychain "lm_new_device_deviceIdentifier"
+//  Hedefler: Keychain + PhotonIMUtils + NSStringUtils + DUSecretCollector
 //
 //  Build:
 //  clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
@@ -17,14 +17,9 @@
 #import <dlfcn.h>
 #include "fishhook.h"
 
-// ─── Değiştirmek istediğin ID buraya ─────────────────────────────────────
-// Orijinal: <binary> (Keychain'den okunuyor)
-// Log'larda gördüğün "13B29B28-..." analytics SDK'ya ait, asıl ID binary.
-// Fake değerin formatı orijinalle aynı olmalı — önce log'layıp orijinali
-// göreceksin, sonra buraya yazabilirsin.
+// ─── Ayarlar ─────────────────────────────────────────────────────────────
+// Gerçek ID: 77bc647fc7ccc3aec3cd94eace776e68fc23b1661774527271fd (52 char hex)
 static NSString *const kFakeDeviceId = @"00000000000000000000000000000000000000000000000000000000";
-
-// Spoof aktif mi? NO yaparak sadece loglama moduna geç.
 static BOOL kSpoofEnabled = YES;
 
 // ─── Log queue ───────────────────────────────────────────────────────────
@@ -105,7 +100,7 @@ static dispatch_queue_t logQ(void) {
 @implementation DHOverlay {
     UIView *_panel; UILabel *_stats; UITableView *_table; UIButton *_minBtn;
     NSMutableArray<LogEntry *> *_entries;
-    NSString *_origId, *_spoofStatus;
+    NSMutableDictionary *_spoofed; // kaynak → spoof sayısı
     BOOL _minimized;
 }
 
@@ -116,6 +111,7 @@ static dispatch_queue_t logQ(void) {
         inst.windowLevel = UIWindowLevelAlert + 100;
         inst.backgroundColor = UIColor.clearColor;
         inst->_entries = [NSMutableArray array];
+        inst->_spoofed = [NSMutableDictionary dictionary];
         [inst buildUI]; inst.hidden = NO;
     });
     return inst;
@@ -129,14 +125,13 @@ static dispatch_queue_t logQ(void) {
     _panel.layer.borderColor  = [UIColor colorWithWhite:0.28 alpha:0.5].CGColor;
     _panel.clipsToBounds = YES;
 
-    // Başlık bar
     UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0,0,W-16,38)];
     bar.backgroundColor = [UIColor colorWithRed:0.07 green:0.07 blue:0.11 alpha:1];
     UIView *handle = [[UIView alloc] initWithFrame:CGRectMake((W-16)/2-20,7,40,4)];
     handle.backgroundColor = [UIColor colorWithWhite:0.38 alpha:1]; handle.layer.cornerRadius = 2;
     [bar addSubview:handle];
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12,17,W-80,16)];
-    title.text = kSpoofEnabled ? @"🎭 deviceId Hook + Spoof" : @"🔍 deviceId Hook (Log only)";
+    title.text = kSpoofEnabled ? @"🎭 deviceId Spoof v3" : @"🔍 deviceId Log";
     title.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
     title.textColor = [UIColor colorWithWhite:0.88 alpha:1]; [bar addSubview:title];
     _minBtn = [UIButton buttonWithType:UIButtonTypeCustom]; _minBtn.frame = CGRectMake(W-16-34,9,28,20);
@@ -146,7 +141,6 @@ static dispatch_queue_t logQ(void) {
     [_minBtn addTarget:self action:@selector(toggleMin) forControlEvents:UIControlEventTouchUpInside];
     [bar addSubview:_minBtn]; [_panel addSubview:bar];
 
-    // Stats
     _stats = [[UILabel alloc] initWithFrame:CGRectMake(10,38,W-36,18)];
     _stats.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
     _stats.textColor = [UIColor colorWithWhite:0.42 alpha:1];
@@ -154,14 +148,12 @@ static dispatch_queue_t logQ(void) {
     UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(0,57,W-16,0.5)];
     sep.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1]; [_panel addSubview:sep];
 
-    // Table
     _table = [[UITableView alloc] initWithFrame:CGRectMake(0,58,W-16,340-58-40)];
     _table.backgroundColor = UIColor.clearColor; _table.separatorStyle = UITableViewCellSeparatorStyleNone;
     _table.dataSource = self; _table.delegate = self;
     _table.rowHeight = UITableViewAutomaticDimension; _table.estimatedRowHeight = 48;
     [_table registerClass:[DHLogCell class] forCellReuseIdentifier:@"C"]; [_panel addSubview:_table];
 
-    // Bottom
     UIView *bot = [[UIView alloc] initWithFrame:CGRectMake(0,300,W-16,40)];
     bot.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.09 alpha:1];
     UIView *sep2 = [[UIView alloc] initWithFrame:CGRectMake(0,0,W-16,0.5)];
@@ -188,10 +180,8 @@ static dispatch_queue_t logQ(void) {
 - (void)appendLevel:(NSString *)lv source:(NSString *)src message:(NSString *)msg {
     LogEntry *e = [[LogEntry alloc] initLevel:lv source:src msg:msg];
     [_entries addObject:e];
-    if ([lv isEqualToString:@"FOUND"] && [src isEqualToString:@"Keychain-lm"]) {
-        _origId = msg;
-    }
-    if ([lv isEqualToString:@"SPOOF"]) _spoofStatus = @"✅ SPOOF AKTİF";
+    if ([lv isEqualToString:@"SPOOF"])
+        _spoofed[src] = @([_spoofed[src] integerValue] + 1);
     [self updateStats]; [_table reloadData];
     if (_entries.count > 0)
         [_table scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:_entries.count-1 inSection:0]
@@ -199,20 +189,22 @@ static dispatch_queue_t logQ(void) {
 }
 
 - (void)updateStats {
+    if (_spoofed.count == 0) { _stats.text = @"Bekleniyor…"; return; }
     NSMutableArray *p = [NSMutableArray array];
-    if (_origId) [p addObject:[NSString stringWithFormat:@"orig=%.12s…", _origId.UTF8String]];
-    if (_spoofStatus) [p addObject:_spoofStatus];
-    else if (kSpoofEnabled) [p addObject:@"⏳ spoof bekleniyor"];
-    _stats.text = p.count > 0 ? [p componentsJoinedByString:@"  "] : @"Bekleniyor…";
+    [_spoofed enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSNumber *v, BOOL *s){
+        [p addObject:[NSString stringWithFormat:@"%@✕%@", k, v]];
+    }];
+    _stats.text = [@"SPOOF: " stringByAppendingString:[p componentsJoinedByString:@" "]];
 }
 
-- (void)clearLogs { [_entries removeAllObjects]; _origId = nil; _spoofStatus = nil; _stats.text = @"Temizlendi"; [_table reloadData]; }
-
+- (void)clearLogs {
+    [_entries removeAllObjects]; [_spoofed removeAllObjects];
+    _stats.text = @"Temizlendi"; [_table reloadData];
+}
 - (void)copyLogs {
     NSMutableString *t = [NSMutableString string];
     for (LogEntry *e in _entries) [t appendFormat:@"[%@][%@][%@] %@\n", e.ts, e.level, e.source, e.message];
-    if (_origId) [t appendFormat:@"\n=== ORİJİNAL deviceId ===\n%@\n", _origId];
-    if (kSpoofEnabled) [t appendFormat:@"\n=== SAHTE deviceId ===\n%@\n", kFakeDeviceId];
+    [t appendFormat:@"\nFake ID: %@\n", kFakeDeviceId];
     [UIPasteboard generalPasteboard].string = t;
     UIButton *b = (UIButton *)[_panel viewWithTag:99];
     NSString *orig = [b titleForState:UIControlStateNormal];
@@ -242,7 +234,7 @@ static dispatch_queue_t logQ(void) {
 @end
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MARK: - Helpers
+// MARK: - Global helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 static void hlog(NSString *lv, NSString *src, NSString *fmt, ...) NS_FORMAT_FUNCTION(3,4);
@@ -262,8 +254,117 @@ static void swiz(Class cls, SEL sel, IMP *orig, IMP newIMP) {
     hlog(@"HOOK", @"Swizzle", @"✓ [%@ %@]", NSStringFromClass(cls), NSStringFromSelector(sel));
 }
 
+static void hookClass(NSString *clsName, SEL sel, IMP *orig, IMP newIMP) {
+    Class cls = NSClassFromString(clsName);
+    if (!cls) { hlog(@"INFO", @"Hook", @"Class yok: %@", clsName); return; }
+    swiz(cls, sel, orig, newIMP);
+}
+
+// 52 char hex'i NSData'ya çevir (Keychain binary format için)
+static NSData *hexToData(NSString *hex) {
+    NSMutableData *d = [NSMutableData dataWithCapacity:hex.length/2];
+    for (NSUInteger i = 0; i+1 < hex.length; i += 2) {
+        unsigned int byte;
+        [[NSScanner scannerWithString:[hex substringWithRange:NSMakeRange(i,2)]] scanHexInt:&byte];
+        uint8_t b = (uint8_t)byte;
+        [d appendBytes:&b length:1];
+    }
+    return d;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// MARK: - Keychain Hook (ana hedef)
+// MARK: - Hook: PhotonIMUtils +deviceID
+// ═══════════════════════════════════════════════════════════════════════════
+
+static IMP orig_photonDeviceID;
+static id h_photonDeviceID(id self, SEL _cmd) {
+    id val = ((id(*)(id,SEL))orig_photonDeviceID)(self, _cmd);
+    hlog(@"FOUND", @"PhotonIMUtils", @"+deviceID orijinal → %@", val);
+    if (kSpoofEnabled) {
+        hlog(@"SPOOF", @"PhotonIM", @"+deviceID → fake");
+        return kFakeDeviceId;
+    }
+    return val;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MARK: - Hook: NSStringUtils +deviceID
+// ═══════════════════════════════════════════════════════════════════════════
+
+static IMP orig_nsStringDeviceID;
+static id h_nsStringDeviceID(id self, SEL _cmd) {
+    id val = ((id(*)(id,SEL))orig_nsStringDeviceID)(self, _cmd);
+    hlog(@"FOUND", @"NSStringUtils", @"+deviceID orijinal → %@", val);
+    if (kSpoofEnabled) {
+        hlog(@"SPOOF", @"NSStringUtils", @"+deviceID → fake");
+        return kFakeDeviceId;
+    }
+    return val;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MARK: - Hook: PhotonIMAuthData -setDeviceId:
+// ═══════════════════════════════════════════════════════════════════════════
+
+static IMP orig_setDeviceId;
+static void h_setDeviceId(id self, SEL _cmd, id val) {
+    hlog(@"FOUND", @"PhotonIMAuthData", @"-setDeviceId: ← %@", val);
+    if (kSpoofEnabled) {
+        hlog(@"SPOOF", @"PhotonIMAuthData", @"-setDeviceId: → fake");
+        ((void(*)(id,SEL,id))orig_setDeviceId)(self, _cmd, kFakeDeviceId);
+        return;
+    }
+    ((void(*)(id,SEL,id))orig_setDeviceId)(self, _cmd, val);
+}
+
+static IMP orig_getDeviceId;
+static id h_getDeviceId(id self, SEL _cmd) {
+    id val = ((id(*)(id,SEL))orig_getDeviceId)(self, _cmd);
+    if (val) hlog(@"FOUND", @"PhotonIMAuthData", @"-deviceId → %@", val);
+    if (kSpoofEnabled && val) {
+        hlog(@"SPOOF", @"PhotonIMAuthData", @"-deviceId → fake");
+        return kFakeDeviceId;
+    }
+    return val;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MARK: - Hook: DUSecretCollector +getUndergroundDeviceId:
+// ═══════════════════════════════════════════════════════════════════════════
+
+static IMP orig_getUnderground;
+static id h_getUnderground(id self, SEL _cmd, id arg) {
+    id val = ((id(*)(id,SEL,id))orig_getUnderground)(self, _cmd, arg);
+    hlog(@"FOUND", @"DUSecretCollector", @"+getUndergroundDeviceId orijinal → %@", val);
+    if (kSpoofEnabled) {
+        hlog(@"SPOOF", @"DUSec", @"+getUndergroundDeviceId → fake");
+        return kFakeDeviceId;
+    }
+    return val;
+}
+
+static IMP orig_getMaster;
+static id h_getMaster(id self, SEL _cmd, id arg) {
+    id val = ((id(*)(id,SEL,id))orig_getMaster)(self, _cmd, arg);
+    // getMaster binary data döndürüyor — sadece logla
+    hlog(@"FOUND", @"DUSecretCollector", @"+getMasterDeviceId → %@", val);
+    return val;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MARK: - Hook: NSUserDefaults (kMATUserDefaultDeviceIDKey)
+// ═══════════════════════════════════════════════════════════════════════════
+
+static IMP orig_udObjectForKey;
+static id h_udObjectForKey(id self, SEL _cmd, NSString *key) {
+    id val = ((id(*)(id,SEL,NSString*))orig_udObjectForKey)(self, _cmd, key);
+    if ([key isEqualToString:@"kMATUserDefaultDeviceIDKey"] && val)
+        hlog(@"FOUND", @"NSUserDefaults", @"kMATUserDefaultDeviceIDKey → %@", val);
+    return val;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MARK: - Hook: Keychain
 // ═══════════════════════════════════════════════════════════════════════════
 
 typedef OSStatus (*SecCopyFn)(CFDictionaryRef, CFTypeRef *);
@@ -276,62 +377,65 @@ static OSStatus h_SecItemCopyMatching(CFDictionaryRef q, CFTypeRef *res) {
     NSString *acc = (__bridge NSString *)CFDictionaryGetValue(q, kSecAttrAccount);
     NSString *svc = (__bridge NSString *)CFDictionaryGetValue(q, kSecAttrService);
 
-    // ─── ANA HEDEF ────────────────────────────────────────────────────────
-    if ([acc isEqualToString:@"lm_new_device_deviceIdentifier"] ||
-        [svc isEqualToString:@"lm_new_device_deviceIdentifier"]) {
+    BOOL isTarget = [acc isEqualToString:@"lm_new_device_deviceIdentifier"] ||
+                    [svc isEqualToString:@"lm_new_device_deviceIdentifier"];
 
-        // Önce orijinal değeri logla
-        NSString *origStr = nil;
-        CFTypeID tid = CFGetTypeID(*res);
-        if (tid == CFDataGetTypeID()) {
-            NSData *d = (__bridge NSData *)*res;
-            origStr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-            if (!origStr) origStr = [d description]; // hex görünüm
-        } else if (tid == CFStringGetTypeID()) {
-            origStr = (__bridge NSString *)*res;
-        } else if (tid == CFDictionaryGetTypeID()) {
-            NSData *d = ((__bridge NSDictionary *)*res)[(id)kSecValueData];
-            origStr = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"<dict>";
+    if (!isTarget) return st;
+
+    // Orijinali logla
+    NSString *origStr = nil;
+    CFTypeID tid = CFGetTypeID(*res);
+    if (tid == CFDataGetTypeID()) {
+        NSData *d = (__bridge NSData *)*res;
+        origStr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (!origStr) {
+            // Hex dump
+            const uint8_t *bytes = d.bytes;
+            NSMutableString *hex = [NSMutableString string];
+            for (NSUInteger i = 0; i < MIN(d.length, 32); i++) [hex appendFormat:@"%02x", bytes[i]];
+            origStr = [NSString stringWithFormat:@"<hex:%@>", hex];
         }
-
-        hlog(@"FOUND", @"Keychain-lm", @"lm_new_device_deviceIdentifier orijinal → %@", origStr ?: @"<binary>");
-
-        if (!kSpoofEnabled) return st;
-
-        // ─── SPOOF ────────────────────────────────────────────────────────
-        NSData *fakeData = [kFakeDeviceId dataUsingEncoding:NSUTF8StringEncoding];
-
-        if (tid == CFDataGetTypeID()) {
-            CFRelease(*res);
-            *res = (__bridge_retained CFTypeRef)fakeData;
-            hlog(@"SPOOF", @"Keychain-lm", @"→ %@", kFakeDeviceId);
-        } else if (tid == CFDictionaryGetTypeID()) {
-            NSMutableDictionary *d = [(__bridge NSDictionary *)*res mutableCopy];
-            d[(id)kSecValueData] = fakeData;
-            CFRelease(*res);
-            *res = (__bridge_retained CFTypeRef)[d copy];
-            hlog(@"SPOOF", @"Keychain-lm", @"(dict) → %@", kFakeDeviceId);
-        } else if (tid == CFStringGetTypeID()) {
-            CFRelease(*res);
-            *res = (__bridge_retained CFTypeRef)kFakeDeviceId;
-            hlog(@"SPOOF", @"Keychain-lm", @"(str) → %@", kFakeDeviceId);
-        }
-        return st;
+    } else if (tid == CFStringGetTypeID()) {
+        origStr = (__bridge NSString *)*res;
+    } else if (tid == CFDictionaryGetTypeID()) {
+        NSData *d = ((__bridge NSDictionary *)*res)[(id)kSecValueData];
+        if (d) origStr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (!origStr) origStr = @"<dict/binary>";
     }
+    hlog(@"FOUND", @"Keychain-lm", @"orijinal → %@", origStr ?: @"<binary>");
 
+    if (!kSpoofEnabled) return st;
+
+    // Spoof — hem string hem binary dene
+    NSData *fakeData = hexToData(kFakeDeviceId); // binary format
+    NSString *fakeStr = kFakeDeviceId;           // string format
+
+    if (tid == CFDataGetTypeID()) {
+        CFRelease(*res);
+        *res = (__bridge_retained CFTypeRef)fakeData;
+        hlog(@"SPOOF", @"Keychain-lm", @"(data) → fake");
+    } else if (tid == CFStringGetTypeID()) {
+        CFRelease(*res);
+        *res = (__bridge_retained CFTypeRef)fakeStr;
+        hlog(@"SPOOF", @"Keychain-lm", @"(str) → fake");
+    } else if (tid == CFDictionaryGetTypeID()) {
+        NSMutableDictionary *d = [(__bridge NSDictionary *)*res mutableCopy];
+        d[(id)kSecValueData] = fakeData;
+        CFRelease(*res);
+        *res = (__bridge_retained CFTypeRef)[d copy];
+        hlog(@"SPOOF", @"Keychain-lm", @"(dict) → fake");
+    }
     return st;
 }
 
-// ─── SecItemAdd / SecItemUpdate hook — yeni ID yazılmasını engelle ────────
 typedef OSStatus (*SecAddFn)(CFDictionaryRef, CFTypeRef *);
 static SecAddFn orig_SecItemAdd;
 static OSStatus h_SecItemAdd(CFDictionaryRef attrs, CFTypeRef *res) {
     NSString *acc = (__bridge NSString *)CFDictionaryGetValue(attrs, kSecAttrAccount);
     if ([acc isEqualToString:@"lm_new_device_deviceIdentifier"] && kSpoofEnabled) {
-        // Sahte değerle yaz
         NSMutableDictionary *d = [(__bridge NSDictionary *)attrs mutableCopy];
-        d[(id)kSecValueData] = [kFakeDeviceId dataUsingEncoding:NSUTF8StringEncoding];
-        hlog(@"SPOOF", @"Keychain-lm", @"SecItemAdd intercepted → fake yazıldı");
+        d[(id)kSecValueData] = hexToData(kFakeDeviceId);
+        hlog(@"SPOOF", @"Keychain-lm", @"SecItemAdd → fake yazıldı");
         return orig_SecItemAdd((__bridge CFDictionaryRef)d, res);
     }
     return orig_SecItemAdd(attrs, res);
@@ -343,77 +447,46 @@ static OSStatus h_SecItemUpdate(CFDictionaryRef q, CFDictionaryRef attrs) {
     NSString *acc = (__bridge NSString *)CFDictionaryGetValue(q, kSecAttrAccount);
     if ([acc isEqualToString:@"lm_new_device_deviceIdentifier"] && kSpoofEnabled) {
         NSMutableDictionary *d = [(__bridge NSDictionary *)attrs mutableCopy];
-        d[(id)kSecValueData] = [kFakeDeviceId dataUsingEncoding:NSUTF8StringEncoding];
-        hlog(@"SPOOF", @"Keychain-lm", @"SecItemUpdate intercepted → fake yazıldı");
+        d[(id)kSecValueData] = hexToData(kFakeDeviceId);
+        hlog(@"SPOOF", @"Keychain-lm", @"SecItemUpdate → fake yazıldı");
         return orig_SecItemUpdate(q, (__bridge CFDictionaryRef)d);
     }
     return orig_SecItemUpdate(q, attrs);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MARK: - NSUserDefaults hook (MATDeviceInfo kaynağı için)
-// ═══════════════════════════════════════════════════════════════════════════
-
-static IMP orig_udObjectForKey, orig_udStringForKey;
-static id h_udObjectForKey(id self, SEL _cmd, NSString *key) {
-    id val = ((id(*)(id,SEL,NSString*))orig_udObjectForKey)(self, _cmd, key);
-    if (val && [key isEqualToString:@"kMATUserDefaultDeviceIDKey"])
-        hlog(@"FOUND", @"NSUserDefaults", @"kMATUserDefaultDeviceIDKey → %@", val);
-    return val;
-}
-static id h_udStringForKey(id self, SEL _cmd, NSString *key) {
-    id val = ((id(*)(id,SEL,NSString*))orig_udStringForKey)(self, _cmd, key);
-    if (val && [key isEqualToString:@"kMATUserDefaultDeviceIDKey"])
-        hlog(@"FOUND", @"NSUserDefaults", @"kMATUserDefaultDeviceIDKey (str) → %@", val);
-    return val;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// MARK: - PhotonIMAuthData — deviceId set edilince logla
-// ═══════════════════════════════════════════════════════════════════════════
-
-static IMP orig_setDeviceId;
-static void h_setDeviceId(id self, SEL _cmd, id val) {
-    hlog(@"FOUND", @"PhotonIMAuthData", @"-setDeviceId: ← %@", val);
-    ((void(*)(id,SEL,id))orig_setDeviceId)(self, _cmd, val);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // MARK: - Constructor
 // ═══════════════════════════════════════════════════════════════════════════
-
-static void hookClass(NSString *clsName, SEL sel, IMP *orig, IMP newIMP) {
-    Class cls = NSClassFromString(clsName);
-    if (!cls) return;
-    swiz(cls, sel, orig, newIMP);
-}
 
 __attribute__((constructor))
 static void init(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [DHOverlay shared];
-        hlog(@"INFO", @"dylib", @"deviceId Hook+Spoof — hazır");
-        hlog(@"INFO", @"dylib", @"Hedef: Keychain lm_new_device_deviceIdentifier");
-        hlog(@"INFO", @"dylib", @"Spoof: %@", kSpoofEnabled ? @"AKTİF ✅" : @"KAPALI (sadece log)");
+        hlog(@"INFO", @"dylib", @"deviceId Spoof v3 — hazır");
         hlog(@"INFO", @"dylib", @"Fake ID: %@", kFakeDeviceId);
+        hlog(@"INFO", @"dylib", @"Spoof: %@", kSpoofEnabled ? @"AKTİF" : @"KAPALI");
 
-        // Keychain — 3 method (read + write + update)
+        // ObjC swizzle'lar
+        hookClass(@"PhotonIMUtils",    @selector(deviceID),      &orig_photonDeviceID, (IMP)h_photonDeviceID);
+        hookClass(@"NSStringUtils",    @selector(deviceID),      &orig_nsStringDeviceID, (IMP)h_nsStringDeviceID);
+        hookClass(@"PhotonIMAuthData", @selector(setDeviceId:),  &orig_setDeviceId, (IMP)h_setDeviceId);
+        hookClass(@"PhotonIMAuthData", @selector(deviceId),      &orig_getDeviceId, (IMP)h_getDeviceId);
+        hookClass(@"DUSecretCollector",@selector(getUndergroundDeviceId:), &orig_getUnderground, (IMP)h_getUnderground);
+        hookClass(@"DUSecretCollector",@selector(getMasterDeviceId:),      &orig_getMaster,      (IMP)h_getMaster);
+        hookClass(@"mlamdfndogdaf",    @selector(getUndergroundDeviceId:), &orig_getUnderground, (IMP)h_getUnderground);
+        swiz([NSUserDefaults class], @selector(objectForKey:), &orig_udObjectForKey, (IMP)h_udObjectForKey);
+
+        // C function hook'ları (fishhook)
         struct rebinding bindings[] = {
             {"SecItemCopyMatching", h_SecItemCopyMatching, (void**)&orig_SecItemCopyMatching},
             {"SecItemAdd",          h_SecItemAdd,          (void**)&orig_SecItemAdd},
             {"SecItemUpdate",       h_SecItemUpdate,       (void**)&orig_SecItemUpdate},
         };
         rebind_symbols(bindings, 3);
-        hlog(@"HOOK", @"Keychain", @"✓ SecItemCopyMatching + Add + Update hooked");
+        hlog(@"HOOK", @"Keychain", @"✓ SecItemCopyMatching + Add + Update");
 
-        // NSUserDefaults
-        swiz([NSUserDefaults class], @selector(objectForKey:), &orig_udObjectForKey, (IMP)h_udObjectForKey);
-        swiz([NSUserDefaults class], @selector(stringForKey:),  &orig_udStringForKey,  (IMP)h_udStringForKey);
-
-        // PhotonIMAuthData
-        hookClass(@"PhotonIMAuthData", @selector(setDeviceId:), &orig_setDeviceId, (IMP)h_setDeviceId);
-
-        hlog(@"INFO", @"dylib", @"Hazır — uygulamayı kullan");
+        hlog(@"INFO", @"dylib", @"Tüm hook'lar aktif — uygulamayı kullan");
+        hlog(@"INFO", @"dylib", @"SPOOF loglarını izle, hangisi ateşlenmiyor dikkat et");
     });
 }
