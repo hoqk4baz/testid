@@ -1,6 +1,6 @@
 //
-//  DeviceIdHook.m  — Sadece loglama
-//  Amaç: HTTP header'a deviceId'yi hangi class koyuyor?
+//  DeviceIdHook.m  — HTTP Header intercept + spoof
+//  deviceId header'ı setValue:forHTTPHeaderField: anında değiştir
 //
 //  Build:
 //  clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
@@ -15,6 +15,10 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #include "fishhook.h"
+
+// ─── Fake deviceId — orijinalle aynı format (52 hex char) ────────────────
+static NSString *const kFakeDeviceId = @"aabbccddeeff00112233445566778899aabbccddeeff00112233";
+static BOOL kSpoofEnabled = YES;
 
 static dispatch_queue_t logQ(void) {
     static dispatch_queue_t q; static dispatch_once_t t;
@@ -32,7 +36,7 @@ static dispatch_queue_t logQ(void) {
 @implementation LogEntry
 - (instancetype)initLevel:(NSString *)lv source:(NSString *)src msg:(NSString *)msg {
     self = [super init]; NSDateFormatter *f = [NSDateFormatter new]; f.dateFormat = @"HH:mm:ss.SSS";
-    self.ts = [f stringFromDate:[NSDate date]]; self.level = lv; self.source = src; self.message = msg;
+    self.ts = [f stringFromDate:[NSDate date]]; self.level=lv; self.source=src; self.message=msg;
     return self;
 }
 @end
@@ -42,21 +46,21 @@ static dispatch_queue_t logQ(void) {
 - (instancetype)initWithStyle:(UITableViewCellStyle)s reuseIdentifier:(NSString *)r {
     self = [super initWithStyle:s reuseIdentifier:r];
     self.backgroundColor = UIColor.clearColor; self.selectionStyle = UITableViewCellSelectionStyleNone;
-    _ts  = [UILabel new]; _ts.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
-    _ts.textColor = [UIColor colorWithWhite:0.4 alpha:1]; _ts.translatesAutoresizingMaskIntoConstraints = NO;
-    _lvl = [UILabel new]; _lvl.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightBold];
-    _lvl.textAlignment = NSTextAlignmentCenter; _lvl.layer.cornerRadius = 3; _lvl.layer.masksToBounds = YES;
-    _lvl.translatesAutoresizingMaskIntoConstraints = NO;
-    _msg = [UILabel new]; _msg.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
-    _msg.textColor = [UIColor colorWithRed:0.88 green:0.88 blue:0.88 alpha:1];
-    _msg.numberOfLines = 0; _msg.translatesAutoresizingMaskIntoConstraints = NO;
+    _ts=[UILabel new]; _ts.font=[UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+    _ts.textColor=[UIColor colorWithWhite:0.4 alpha:1]; _ts.translatesAutoresizingMaskIntoConstraints=NO;
+    _lvl=[UILabel new]; _lvl.font=[UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightBold];
+    _lvl.textAlignment=NSTextAlignmentCenter; _lvl.layer.cornerRadius=3; _lvl.layer.masksToBounds=YES;
+    _lvl.translatesAutoresizingMaskIntoConstraints=NO;
+    _msg=[UILabel new]; _msg.font=[UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+    _msg.textColor=[UIColor colorWithRed:0.88 green:0.88 blue:0.88 alpha:1];
+    _msg.numberOfLines=0; _msg.translatesAutoresizingMaskIntoConstraints=NO;
     [self.contentView addSubview:_ts]; [self.contentView addSubview:_lvl]; [self.contentView addSubview:_msg];
     [NSLayoutConstraint activateConstraints:@[
         [_ts.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4],
         [_ts.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:8],
         [_lvl.centerYAnchor constraintEqualToAnchor:_ts.centerYAnchor],
         [_lvl.leadingAnchor constraintEqualToAnchor:_ts.trailingAnchor constant:5],
-        [_lvl.widthAnchor constraintEqualToConstant:52], [_lvl.heightAnchor constraintEqualToConstant:14],
+        [_lvl.widthAnchor constraintEqualToConstant:52],[_lvl.heightAnchor constraintEqualToConstant:14],
         [_msg.topAnchor constraintEqualToAnchor:_ts.bottomAnchor constant:2],
         [_msg.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:8],
         [_msg.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-8],
@@ -64,14 +68,15 @@ static dispatch_queue_t logQ(void) {
     ]]; return self;
 }
 - (void)configure:(LogEntry *)e {
-    _ts.text = e.ts; _msg.text = [NSString stringWithFormat:@"[%@] %@", e.source, e.message];
+    _ts.text=e.ts; _msg.text=[NSString stringWithFormat:@"[%@] %@", e.source, e.message];
     NSDictionary *p = @{
-        @"FOUND": @[[UIColor colorWithRed:0.30 green:0.95 blue:0.50 alpha:1], [UIColor colorWithRed:0.05 green:0.28 blue:0.10 alpha:1]],
-        @"HOOK":  @[[UIColor colorWithRed:0.47 green:0.75 blue:1.00 alpha:1], [UIColor colorWithRed:0.08 green:0.18 blue:0.32 alpha:1]],
-        @"INFO":  @[[UIColor colorWithWhite:0.55 alpha:1], [UIColor colorWithWhite:0.14 alpha:1]],
+        @"FOUND": @[[UIColor colorWithRed:0.30 green:0.95 blue:0.50 alpha:1],[UIColor colorWithRed:0.05 green:0.28 blue:0.10 alpha:1]],
+        @"SPOOF": @[[UIColor colorWithRed:0.82 green:0.66 blue:1.00 alpha:1],[UIColor colorWithRed:0.20 green:0.10 blue:0.30 alpha:1]],
+        @"HOOK":  @[[UIColor colorWithRed:0.47 green:0.75 blue:1.00 alpha:1],[UIColor colorWithRed:0.08 green:0.18 blue:0.32 alpha:1]],
+        @"INFO":  @[[UIColor colorWithWhite:0.55 alpha:1],[UIColor colorWithWhite:0.14 alpha:1]],
     };
     NSArray *pair = p[e.level] ?: p[@"INFO"];
-    _lvl.text = e.level; _lvl.textColor = pair[0]; _lvl.backgroundColor = pair[1];
+    _lvl.text=e.level; _lvl.textColor=pair[0]; _lvl.backgroundColor=pair[1];
 }
 @end
 
@@ -83,84 +88,91 @@ static dispatch_queue_t logQ(void) {
 @implementation DHOverlay {
     UIView *_panel; UILabel *_stats; UITableView *_table; UIButton *_minBtn;
     NSMutableArray<LogEntry *> *_entries; BOOL _minimized;
-    NSString *_lastSrc;
+    NSUInteger _spoofCount;
 }
 + (instancetype)shared {
     static DHOverlay *i; static dispatch_once_t t;
     dispatch_once(&t, ^{
-        i = [[DHOverlay alloc] initWithFrame:UIScreen.mainScreen.bounds];
-        i.windowLevel = UIWindowLevelAlert + 100; i.backgroundColor = UIColor.clearColor;
-        i->_entries = [NSMutableArray array]; [i buildUI]; i.hidden = NO;
+        i=[[DHOverlay alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        i.windowLevel=UIWindowLevelAlert+100; i.backgroundColor=UIColor.clearColor;
+        i->_entries=[NSMutableArray array]; [i buildUI]; i.hidden=NO;
     }); return i;
 }
 - (void)buildUI {
-    CGFloat W = UIScreen.mainScreen.bounds.size.width;
-    _panel = [[UIView alloc] initWithFrame:CGRectMake(8,60,W-16,340)];
-    _panel.backgroundColor = [UIColor colorWithRed:0.04 green:0.04 blue:0.07 alpha:0.95];
-    _panel.layer.cornerRadius = 14; _panel.layer.borderWidth = 0.5;
-    _panel.layer.borderColor = [UIColor colorWithWhite:0.28 alpha:0.5].CGColor; _panel.clipsToBounds = YES;
+    CGFloat W=UIScreen.mainScreen.bounds.size.width;
+    _panel=[[UIView alloc] initWithFrame:CGRectMake(8,60,W-16,340)];
+    _panel.backgroundColor=[UIColor colorWithRed:0.04 green:0.04 blue:0.07 alpha:0.95];
+    _panel.layer.cornerRadius=14; _panel.layer.borderWidth=0.5;
+    _panel.layer.borderColor=[UIColor colorWithWhite:0.28 alpha:0.5].CGColor; _panel.clipsToBounds=YES;
 
-    UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0,0,W-16,38)];
-    bar.backgroundColor = [UIColor colorWithRed:0.07 green:0.07 blue:0.11 alpha:1];
-    UIView *h = [[UIView alloc] initWithFrame:CGRectMake((W-16)/2-20,7,40,4)];
-    h.backgroundColor = [UIColor colorWithWhite:0.38 alpha:1]; h.layer.cornerRadius = 2; [bar addSubview:h];
-    UILabel *ttl = [[UILabel alloc] initWithFrame:CGRectMake(12,17,W-80,16)];
-    ttl.text = @"📡 deviceId Header Tracer"; ttl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
-    ttl.textColor = [UIColor colorWithWhite:0.88 alpha:1]; [bar addSubview:ttl];
-    _minBtn = [UIButton buttonWithType:UIButtonTypeCustom]; _minBtn.frame = CGRectMake(W-16-34,9,28,20);
+    UIView *bar=[[UIView alloc] initWithFrame:CGRectMake(0,0,W-16,38)];
+    bar.backgroundColor=[UIColor colorWithRed:0.07 green:0.07 blue:0.11 alpha:1];
+    UIView *h=[[UIView alloc] initWithFrame:CGRectMake((W-16)/2-20,7,40,4)];
+    h.backgroundColor=[UIColor colorWithWhite:0.38 alpha:1]; h.layer.cornerRadius=2; [bar addSubview:h];
+    UILabel *ttl=[[UILabel alloc] initWithFrame:CGRectMake(12,17,W-80,16)];
+    ttl.text=kSpoofEnabled ? @"🎭 deviceId Spoof — Header" : @"📡 deviceId Tracer";
+    ttl.font=[UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+    ttl.textColor=[UIColor colorWithWhite:0.88 alpha:1]; [bar addSubview:ttl];
+    _minBtn=[UIButton buttonWithType:UIButtonTypeCustom]; _minBtn.frame=CGRectMake(W-16-34,9,28,20);
     [_minBtn setTitle:@"−" forState:UIControlStateNormal];
-    _minBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    _minBtn.titleLabel.font=[UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
     [_minBtn setTitleColor:[UIColor colorWithWhite:0.6 alpha:1] forState:UIControlStateNormal];
     [_minBtn addTarget:self action:@selector(toggleMin) forControlEvents:UIControlEventTouchUpInside];
     [bar addSubview:_minBtn]; [_panel addSubview:bar];
 
-    _stats = [[UILabel alloc] initWithFrame:CGRectMake(10,38,W-36,18)];
-    _stats.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
-    _stats.textColor = [UIColor colorWithWhite:0.42 alpha:1]; _stats.text = @"Bekleniyor…"; [_panel addSubview:_stats];
-    UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(0,57,W-16,0.5)];
-    sep.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1]; [_panel addSubview:sep];
+    _stats=[[UILabel alloc] initWithFrame:CGRectMake(10,38,W-36,18)];
+    _stats.font=[UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+    _stats.textColor=[UIColor colorWithWhite:0.42 alpha:1]; _stats.text=@"Bekleniyor…"; [_panel addSubview:_stats];
+    UIView *sep=[[UIView alloc] initWithFrame:CGRectMake(0,57,W-16,0.5)];
+    sep.backgroundColor=[UIColor colorWithWhite:0.2 alpha:1]; [_panel addSubview:sep];
 
-    _table = [[UITableView alloc] initWithFrame:CGRectMake(0,58,W-16,340-58-40)];
-    _table.backgroundColor = UIColor.clearColor; _table.separatorStyle = UITableViewCellSeparatorStyleNone;
-    _table.dataSource = self; _table.delegate = self;
-    _table.rowHeight = UITableViewAutomaticDimension; _table.estimatedRowHeight = 48;
+    _table=[[UITableView alloc] initWithFrame:CGRectMake(0,58,W-16,340-58-40)];
+    _table.backgroundColor=UIColor.clearColor; _table.separatorStyle=UITableViewCellSeparatorStyleNone;
+    _table.dataSource=self; _table.delegate=self;
+    _table.rowHeight=UITableViewAutomaticDimension; _table.estimatedRowHeight=48;
     [_table registerClass:[DHLogCell class] forCellReuseIdentifier:@"C"]; [_panel addSubview:_table];
 
-    UIView *bot = [[UIView alloc] initWithFrame:CGRectMake(0,300,W-16,40)];
-    bot.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.09 alpha:1];
-    UIView *sep2 = [[UIView alloc] initWithFrame:CGRectMake(0,0,W-16,0.5)];
-    sep2.backgroundColor = [UIColor colorWithWhite:0.18 alpha:1]; [bot addSubview:sep2];
-    UIButton *clr = [UIButton buttonWithType:UIButtonTypeCustom]; clr.frame = CGRectMake(10,8,56,24);
-    [clr setTitle:@"Temizle" forState:UIControlStateNormal]; clr.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    UIView *bot=[[UIView alloc] initWithFrame:CGRectMake(0,300,W-16,40)];
+    bot.backgroundColor=[UIColor colorWithRed:0.05 green:0.05 blue:0.09 alpha:1];
+    UIView *sep2=[[UIView alloc] initWithFrame:CGRectMake(0,0,W-16,0.5)];
+    sep2.backgroundColor=[UIColor colorWithWhite:0.18 alpha:1]; [bot addSubview:sep2];
+    UIButton *clr=[UIButton buttonWithType:UIButtonTypeCustom]; clr.frame=CGRectMake(10,8,56,24);
+    [clr setTitle:@"Temizle" forState:UIControlStateNormal];
+    clr.titleLabel.font=[UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     [clr setTitleColor:[UIColor colorWithWhite:0.42 alpha:1] forState:UIControlStateNormal];
-    [clr addTarget:self action:@selector(clearLogs) forControlEvents:UIControlEventTouchUpInside]; [bot addSubview:clr];
-    UIButton *cpy = [UIButton buttonWithType:UIButtonTypeCustom]; cpy.tag=99; cpy.frame = CGRectMake(W-16-88,6,80,28);
-    [cpy setTitle:@"📋 Kopyala" forState:UIControlStateNormal]; cpy.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+    [clr addTarget:self action:@selector(clearLogs) forControlEvents:UIControlEventTouchUpInside];
+    [bot addSubview:clr];
+    UIButton *cpy=[UIButton buttonWithType:UIButtonTypeCustom]; cpy.tag=99;
+    cpy.frame=CGRectMake(W-16-88,6,80,28);
+    [cpy setTitle:@"📋 Kopyala" forState:UIControlStateNormal];
+    cpy.titleLabel.font=[UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
     [cpy setTitleColor:[UIColor colorWithRed:0.47 green:0.75 blue:1.0 alpha:1] forState:UIControlStateNormal];
-    cpy.layer.borderWidth=0.5; cpy.layer.cornerRadius=6; cpy.layer.borderColor=[UIColor colorWithRed:0.47 green:0.75 blue:1.0 alpha:0.4].CGColor;
-    [cpy addTarget:self action:@selector(copyLogs) forControlEvents:UIControlEventTouchUpInside]; [bot addSubview:cpy];
-    [_panel addSubview:bot];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    cpy.layer.borderWidth=0.5; cpy.layer.cornerRadius=6;
+    cpy.layer.borderColor=[UIColor colorWithRed:0.47 green:0.75 blue:1.0 alpha:0.4].CGColor;
+    [cpy addTarget:self action:@selector(copyLogs) forControlEvents:UIControlEventTouchUpInside];
+    [bot addSubview:cpy]; [_panel addSubview:bot];
+    UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
     [bar addGestureRecognizer:pan]; [self addSubview:_panel];
 }
 - (void)appendLevel:(NSString *)lv source:(NSString *)src message:(NSString *)msg {
-    LogEntry *e = [[LogEntry alloc] initLevel:lv source:src msg:msg];
+    LogEntry *e=[[LogEntry alloc] initLevel:lv source:src msg:msg];
     [_entries addObject:e];
-    if ([lv isEqualToString:@"FOUND"]) {
-        _lastSrc = src;
-        _stats.text = [NSString stringWithFormat:@"Son kaynak: %@ | toplam:%lu", src, (unsigned long)_entries.count];
+    if ([lv isEqualToString:@"SPOOF"]) {
+        _spoofCount++;
+        _stats.text=[NSString stringWithFormat:@"✅ Spoof aktif — %lu istek değiştirildi", (unsigned long)_spoofCount];
     }
     [_table reloadData];
-    if (_entries.count > 0)
+    if (_entries.count>0)
         [_table scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:_entries.count-1 inSection:0]
                       atScrollPosition:UITableViewScrollPositionBottom animated:NO];
 }
-- (void)clearLogs { [_entries removeAllObjects]; _lastSrc=nil; _stats.text=@"Temizlendi"; [_table reloadData]; }
+- (void)clearLogs { [_entries removeAllObjects]; _spoofCount=0; _stats.text=@"Temizlendi"; [_table reloadData]; }
 - (void)copyLogs {
-    NSMutableString *t = [NSMutableString string];
-    for (LogEntry *e in _entries) [t appendFormat:@"[%@][%@][%@] %@\n", e.ts, e.level, e.source, e.message];
-    [UIPasteboard generalPasteboard].string = t;
-    UIButton *b = (UIButton *)[_panel viewWithTag:99]; NSString *o = [b titleForState:UIControlStateNormal];
+    NSMutableString *t=[NSMutableString string];
+    for (LogEntry *e in _entries) [t appendFormat:@"[%@][%@][%@] %@\n",e.ts,e.level,e.source,e.message];
+    [t appendFormat:@"\n=== FAKE deviceId ===\n%@\n",kFakeDeviceId];
+    [UIPasteboard generalPasteboard].string=t;
+    UIButton *b=(UIButton *)[_panel viewWithTag:99]; NSString *o=[b titleForState:UIControlStateNormal];
     [b setTitle:@"✅ Kopyalandı" forState:UIControlStateNormal];
     [b setTitleColor:[UIColor colorWithRed:0.30 green:0.95 blue:0.50 alpha:1] forState:UIControlStateNormal];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
@@ -181,7 +193,8 @@ static dispatch_queue_t logQ(void) {
 }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _entries.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    DHLogCell *c=[tv dequeueReusableCellWithIdentifier:@"C" forIndexPath:ip]; [c configure:_entries[ip.row]]; return c;
+    DHLogCell *c=[tv dequeueReusableCellWithIdentifier:@"C" forIndexPath:ip];
+    [c configure:_entries[ip.row]]; return c;
 }
 @end
 
@@ -192,127 +205,36 @@ static dispatch_queue_t logQ(void) {
 static void hlog(NSString *lv, NSString *src, NSString *fmt, ...) NS_FORMAT_FUNCTION(3,4);
 static void hlog(NSString *lv, NSString *src, NSString *fmt, ...) {
     va_list a; va_start(a,fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:a]; va_end(a);
-    NSLog(@"[DHook][%@][%@] %@", lv, src, msg);
+    NSString *msg=[[NSString alloc] initWithFormat:fmt arguments:a]; va_end(a);
+    NSLog(@"[DHook][%@][%@] %@",lv,src,msg);
     dispatch_async(logQ(), ^{
-        dispatch_async(dispatch_get_main_queue(), ^{ [[DHOverlay shared] appendLevel:lv source:src message:msg]; });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[DHOverlay shared] appendLevel:lv source:src message:msg];
+        });
     });
 }
 
-// App'e ait call stack frame'lerini al
-static NSString *appStack(void) {
-    NSString *exe = [NSBundle mainBundle].executablePath.lastPathComponent;
-    NSMutableArray *f = [NSMutableArray array];
-    for (NSString *fr in [NSThread callStackSymbols])
-        if ([fr containsString:exe] && f.count < 6) [f addObject:fr];
-    return f.count > 0 ? [f componentsJoinedByString:@"\n    "] : @"(C/Flutter layer)";
-}
-
 static void swiz(Class cls, SEL sel, IMP *orig, IMP newIMP) {
-    Method m = class_getInstanceMethod(cls,sel) ?: class_getClassMethod(cls,sel);
+    Method m=class_getInstanceMethod(cls,sel)?:class_getClassMethod(cls,sel);
     if (!m) return; *orig=method_getImplementation(m); method_setImplementation(m,newIMP);
     hlog(@"HOOK",@"Swizzle",@"✓ [%@ %@]",NSStringFromClass(cls),NSStringFromSelector(sel));
 }
-static void hookClass(NSString *name, SEL sel, IMP *orig, IMP newIMP) {
-    Class cls=NSClassFromString(name); if(!cls) return; swiz(cls,sel,orig,newIMP);
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MARK: - Hook implementations (sadece log)
+// MARK: - Ana Hook: setValue:forHTTPHeaderField:
+// Header'a yazılmadan önce yakala ve değiştir
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── 1. NSMutableURLRequest setValue:forHTTPHeaderField:
-//    HTTP header'ı set edildiği an — en güvenilir yöntem
 static IMP orig_setValue_forHTTPHeaderField;
 static void h_setValue_forHTTPHeaderField(id self, SEL _cmd, NSString *val, NSString *field) {
+    if ([field.lowercaseString isEqualToString:@"deviceid"]) {
+        hlog(@"FOUND", @"HTTP", @"deviceId orijinal: %@", val);
+        if (kSpoofEnabled) {
+            hlog(@"SPOOF", @"HTTP", @"deviceId: %@ → %@", val, kFakeDeviceId);
+            val = kFakeDeviceId;
+        }
+    }
     ((void(*)(id,SEL,NSString*,NSString*))orig_setValue_forHTTPHeaderField)(self,_cmd,val,field);
-    if ([field.lowercaseString containsString:@"device"] ||
-        [field.lowercaseString isEqualToString:@"deviceid"] ||
-        [field.lowercaseString containsString:@"x-device"]) {
-        hlog(@"FOUND", @"HTTP-setValue",
-             @"setValue:\"%@\" forHTTPHeaderField:\"%@\"\n    %@", val, field, appStack());
-    }
-}
-
-// ── 2. NSURLRequest allHTTPHeaderFields — header dict okunurken
-static IMP orig_allHTTPHeaderFields;
-static NSDictionary *h_allHTTPHeaderFields(id self, SEL _cmd) {
-    NSDictionary *headers = ((NSDictionary*(*)(id,SEL))orig_allHTTPHeaderFields)(self,_cmd);
-    [headers enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *v, BOOL *s) {
-        if ([k.lowercaseString containsString:@"device"] ||
-            [k.lowercaseString isEqualToString:@"deviceid"]) {
-            hlog(@"FOUND", @"HTTP-allHeaders",
-                 @"%@: %@\n    %@", k, v, appStack());
-        }
-    }];
-    return headers;
-}
-
-// ── 3. PhotonIMUtils +deviceID
-static IMP orig_photonDeviceID;
-static id h_photonDeviceID(id self, SEL _cmd) {
-    id val = ((id(*)(id,SEL))orig_photonDeviceID)(self,_cmd);
-    hlog(@"FOUND",@"PhotonIMUtils",@"+deviceID → %@\n    %@", val, appStack());
-    return val;
-}
-
-// ── 4. NSStringUtils +deviceID
-static IMP orig_nsStringDeviceID;
-static id h_nsStringDeviceID(id self, SEL _cmd) {
-    id val = ((id(*)(id,SEL))orig_nsStringDeviceID)(self,_cmd);
-    hlog(@"FOUND",@"NSStringUtils",@"+deviceID → %@\n    %@", val, appStack());
-    return val;
-}
-
-// ── 5. PhotonIMAuthData -deviceId getter
-static IMP orig_authDataDeviceId;
-static id h_authDataDeviceId(id self, SEL _cmd) {
-    id val = ((id(*)(id,SEL))orig_authDataDeviceId)(self,_cmd);
-    hlog(@"FOUND",@"PhotonIMAuthData",@"-deviceId → %@\n    %@", val, appStack());
-    return val;
-}
-
-// ── 6. PhotonIMAuthData -setDeviceId:
-static IMP orig_setDeviceId;
-static void h_setDeviceId(id self, SEL _cmd, id val) {
-    hlog(@"FOUND",@"PhotonIMAuthData",@"-setDeviceId: ← %@\n    %@", val, appStack());
-    ((void(*)(id,SEL,id))orig_setDeviceId)(self,_cmd,val);
-}
-
-// ── 7. DUSecretCollector +getUndergroundDeviceId:
-static IMP orig_getUndergroundDeviceId;
-static id h_getUndergroundDeviceId(id self, SEL _cmd, id arg) {
-    id val = ((id(*)(id,SEL,id))orig_getUndergroundDeviceId)(self,_cmd,arg);
-    hlog(@"FOUND",@"DUSecretCollector",@"+getUndergroundDeviceId → %@\n    %@", val, appStack());
-    return val;
-}
-
-// ── 8. Keychain — lm_new_device_deviceIdentifier
-typedef OSStatus (*SecCopyFn)(CFDictionaryRef, CFTypeRef *);
-static SecCopyFn orig_SecItemCopyMatching;
-static OSStatus h_SecItemCopyMatching(CFDictionaryRef q, CFTypeRef *res) {
-    OSStatus st = orig_SecItemCopyMatching(q,res);
-    if (st==errSecSuccess && res && *res) {
-        NSString *acc = (__bridge NSString*)CFDictionaryGetValue(q, kSecAttrAccount);
-        if ([acc isEqualToString:@"lm_new_device_deviceIdentifier"]) {
-            NSString *val = nil;
-            CFTypeID tid = CFGetTypeID(*res);
-            if (tid==CFDataGetTypeID()) {
-                NSData *d = (__bridge NSData*)*res;
-                val = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-                if (!val) {
-                    const uint8_t *b=d.bytes; NSMutableString *hx=[NSMutableString string];
-                    for (NSUInteger i=0;i<d.length;i++) [hx appendFormat:@"%02x",b[i]];
-                    val = hx;
-                }
-            } else if (tid==CFStringGetTypeID()) {
-                val = (__bridge NSString*)*res;
-            }
-            hlog(@"FOUND",@"Keychain-lm",@"lm_new_device_deviceIdentifier → %@\n    %@",
-                 val?:@"<binary>", appStack());
-        }
-    }
-    return st;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -324,29 +246,15 @@ static void init(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [DHOverlay shared];
-        hlog(@"INFO",@"dylib",@"deviceId Header Tracer — hazır (sadece log)");
+        hlog(@"INFO",@"dylib",@"deviceId Header Spoof — hazır");
+        hlog(@"INFO",@"dylib",@"Fake ID: %@", kFakeDeviceId);
+        hlog(@"INFO",@"dylib",@"Spoof: %@", kSpoofEnabled ? @"AKTİF ✅" : @"KAPALI");
 
-        // HTTP header set/get — en kritik
-        swiz([NSMutableURLRequest class], @selector(setValue:forHTTPHeaderField:),
-             &orig_setValue_forHTTPHeaderField, (IMP)h_setValue_forHTTPHeaderField);
-        swiz([NSURLRequest class], @selector(allHTTPHeaderFields),
-             &orig_allHTTPHeaderFields, (IMP)h_allHTTPHeaderFields);
-        swiz([NSMutableURLRequest class], @selector(allHTTPHeaderFields),
-             &orig_allHTTPHeaderFields, (IMP)h_allHTTPHeaderFields);
+        swiz([NSMutableURLRequest class],
+             @selector(setValue:forHTTPHeaderField:),
+             &orig_setValue_forHTTPHeaderField,
+             (IMP)h_setValue_forHTTPHeaderField);
 
-        // deviceId üreticiler
-        hookClass(@"PhotonIMUtils",     @selector(deviceID),      &orig_photonDeviceID,          (IMP)h_photonDeviceID);
-        hookClass(@"NSStringUtils",     @selector(deviceID),      &orig_nsStringDeviceID,        (IMP)h_nsStringDeviceID);
-        hookClass(@"PhotonIMAuthData",  @selector(deviceId),      &orig_authDataDeviceId,        (IMP)h_authDataDeviceId);
-        hookClass(@"PhotonIMAuthData",  @selector(setDeviceId:),  &orig_setDeviceId,             (IMP)h_setDeviceId);
-        hookClass(@"DUSecretCollector", @selector(getUndergroundDeviceId:), &orig_getUndergroundDeviceId, (IMP)h_getUndergroundDeviceId);
-
-        // Keychain
-        struct rebinding b[] = {{"SecItemCopyMatching", h_SecItemCopyMatching, (void**)&orig_SecItemCopyMatching}};
-        rebind_symbols(b, 1);
-        hlog(@"HOOK",@"Keychain",@"✓ SecItemCopyMatching");
-
-        hlog(@"INFO",@"dylib",@"Tüm hook'lar aktif — API çağrısı yap, logları izle");
-        hlog(@"INFO",@"dylib",@"HTTP-setValue FOUND → header'ı tam o an kim set etti gösterir");
+        hlog(@"INFO",@"dylib",@"Hazır — API isteği bekleniyor");
     });
 }
