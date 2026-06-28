@@ -154,6 +154,12 @@ static dispatch_queue_t logQ(void) {
     UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
     [bar addGestureRecognizer:pan]; [self addSubview:_panel];
 }
+
+// Panel dışına tıklanınca touch'u app'e geçir
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self) ? nil : hit;
+}
 - (void)appendLevel:(NSString *)lv source:(NSString *)src message:(NSString *)msg {
     LogEntry *e=[[LogEntry alloc] initLevel:lv source:src msg:msg];
     [_entries addObject:e];
