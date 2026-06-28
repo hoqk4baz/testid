@@ -296,33 +296,32 @@ static void h_setHTTPBody(id self, SEL _cmd, NSData *body) {
 
 __attribute__((constructor))
 static void init(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),
+    // Hook'ları hemen kur — uygulama açılır açılmaz giden istekleri yakala
+    // 1. Header
+    swiz([NSMutableURLRequest class],
+         @selector(setValue:forHTTPHeaderField:),
+         &orig_setValue_forHTTPHeaderField,
+         (IMP)h_setValue_forHTTPHeaderField);
+
+    // 2. URL query string
+    swiz([NSMutableURLRequest class],
+         @selector(setURL:),
+         &orig_setURL,
+         (IMP)h_setURL);
+
+    // 3. HTTP Body
+    swiz([NSMutableURLRequest class],
+         @selector(setHTTPBody:),
+         &orig_setHTTPBody,
+         (IMP)h_setHTTPBody);
+
+    // Overlay UI ana thread hazır olunca kur (geç olabilir, hook'lar zaten aktif)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.5*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [DHOverlay shared];
-        hlog(@"INFO",@"dylib",@"deviceId Header Spoof — hazır");
-        hlog(@"INFO",@"dylib",@"Fake ID: %@", kFakeDeviceId);
-        hlog(@"INFO",@"dylib",@"Spoof: %@", kSpoofEnabled ? @"AKTİF ✅" : @"KAPALI");
-
-        // 1. Header
-        swiz([NSMutableURLRequest class],
-             @selector(setValue:forHTTPHeaderField:),
-             &orig_setValue_forHTTPHeaderField,
-             (IMP)h_setValue_forHTTPHeaderField);
-
-        // 2. URL query string
-        swiz([NSMutableURLRequest class],
-             @selector(setURL:),
-             &orig_setURL,
-             (IMP)h_setURL);
-
-        // 3. HTTP Body
-        swiz([NSMutableURLRequest class],
-             @selector(setHTTPBody:),
-             &orig_setHTTPBody,
-             (IMP)h_setHTTPBody);
-
-        hlog(@"INFO",@"dylib",@"Hedef ID: %@", kTargetId);
-        hlog(@"INFO",@"dylib",@"Fake  ID: %@", kFakeDeviceId);
-        hlog(@"INFO",@"dylib",@"Header + URL + Body hook'ları aktif");
+        hlog(@"INFO",@"dylib",@"deviceId Spoof — hazır");
+        hlog(@"INFO",@"dylib",@"Hedef: %@", kTargetId);
+        hlog(@"INFO",@"dylib",@"Fake : %@", kFakeDeviceId);
+        hlog(@"INFO",@"dylib",@"Hook'lar constructor'da kuruldu ✅");
     });
 }
