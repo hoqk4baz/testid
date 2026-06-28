@@ -227,21 +227,68 @@ static void swiz(Class cls, SEL sel, IMP *orig, IMP newIMP) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MARK: - Ana Hook: setValue:forHTTPHeaderField:
-// Header'a yazılmadan önce yakala ve değiştir
+// MARK: - Hooks: her yerde kFakeDeviceId ile değiştir
 // ═══════════════════════════════════════════════════════════════════════════
 
+static NSString *const kTargetId = @"77bc647fc7ccc3aec3cd94eace776e68fc23b1661774527271fd";
+
+// Bir string içinde hedef ID varsa değiştir
+static NSString *replaceId(NSString *s) {
+    if (!s || ![s isKindOfClass:[NSString class]]) return s;
+    if ([s containsString:kTargetId])
+        return [s stringByReplacingOccurrencesOfString:kTargetId withString:kFakeDeviceId];
+    return s;
+}
+
+// Data içinde hedef ID varsa değiştir
+static NSData *replaceIdInData(NSData *data) {
+    if (!data) return data;
+    NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!s) return data;
+    NSString *replaced = replaceId(s);
+    if (replaced == s) return data; // değişmedi
+    hlog(@"SPOOF", @"Body", @"body içinde deviceId değiştirildi");
+    return [replaced dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+// ── 1. Header ─────────────────────────────────────────────────────────────
 static IMP orig_setValue_forHTTPHeaderField;
 static void h_setValue_forHTTPHeaderField(id self, SEL _cmd, NSString *val, NSString *field) {
-    if ([field.lowercaseString isEqualToString:@"deviceid"]) {
-        hlog(@"FOUND", @"HTTP", @"deviceId orijinal: %@", val);
-        if (kSpoofEnabled) {
-            hlog(@"SPOOF", @"HTTP", @"deviceId: %@ → %@", val, kFakeDeviceId);
-            val = kFakeDeviceId;
-        }
+    if (kSpoofEnabled && [val isKindOfClass:[NSString class]] && [val containsString:kTargetId]) {
+        hlog(@"FOUND", @"Header", @"%@: %@", field, val);
+        val = replaceId(val);
+        hlog(@"SPOOF", @"Header", @"%@: %@", field, val);
     }
     ((void(*)(id,SEL,NSString*,NSString*))orig_setValue_forHTTPHeaderField)(self,_cmd,val,field);
 }
+
+// ── 2. URL (query string) ─────────────────────────────────────────────────
+static IMP orig_setURL;
+static void h_setURL(id self, SEL _cmd, NSURL *url) {
+    if (kSpoofEnabled && url) {
+        NSString *abs = url.absoluteString;
+        if ([abs containsString:kTargetId]) {
+            hlog(@"FOUND", @"URL", @"%@", abs);
+            NSString *replaced = replaceId(abs);
+            url = [NSURL URLWithString:replaced];
+            hlog(@"SPOOF", @"URL", @"%@", replaced);
+        }
+    }
+    ((void(*)(id,SEL,NSURL*))orig_setURL)(self,_cmd,url);
+}
+
+// ── 3. HTTP Body ──────────────────────────────────────────────────────────
+static IMP orig_setHTTPBody;
+static void h_setHTTPBody(id self, SEL _cmd, NSData *body) {
+    if (kSpoofEnabled && body) {
+        NSData *replaced = replaceIdInData(body);
+        if (replaced != body) body = replaced;
+    }
+    ((void(*)(id,SEL,NSData*))orig_setHTTPBody)(self,_cmd,body);
+}
+
+// ── 4. HTTP Body Stream (multipart gibi durumlarda) ───────────────────────
+// Stream hook zor, body yeterliyse atla
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MARK: - Constructor
@@ -256,11 +303,26 @@ static void init(void) {
         hlog(@"INFO",@"dylib",@"Fake ID: %@", kFakeDeviceId);
         hlog(@"INFO",@"dylib",@"Spoof: %@", kSpoofEnabled ? @"AKTİF ✅" : @"KAPALI");
 
+        // 1. Header
         swiz([NSMutableURLRequest class],
              @selector(setValue:forHTTPHeaderField:),
              &orig_setValue_forHTTPHeaderField,
              (IMP)h_setValue_forHTTPHeaderField);
 
-        hlog(@"INFO",@"dylib",@"Hazır — API isteği bekleniyor");
+        // 2. URL query string
+        swiz([NSMutableURLRequest class],
+             @selector(setURL:),
+             &orig_setURL,
+             (IMP)h_setURL);
+
+        // 3. HTTP Body
+        swiz([NSMutableURLRequest class],
+             @selector(setHTTPBody:),
+             &orig_setHTTPBody,
+             (IMP)h_setHTTPBody);
+
+        hlog(@"INFO",@"dylib",@"Hedef ID: %@", kTargetId);
+        hlog(@"INFO",@"dylib",@"Fake  ID: %@", kFakeDeviceId);
+        hlog(@"INFO",@"dylib",@"Header + URL + Body hook'ları aktif");
     });
 }
