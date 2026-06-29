@@ -1,79 +1,45 @@
 //
-//  DeviceIdHook.m — deviceId spoof (header + body + URL)
-//  Constructor'da hook kur, UI sonra yükle
+//  DeviceIdHook.m — Cihaz bilgisi spoof
+//  UIDevice, NSProcessInfo, Keychain kaynaklarını değiştirir
+//  Constructor'da anında devreye girer
 //
 //  Build:
 //  clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
 //    -miphoneos-version-min=13.0 -shared -fobjc-arc -O2 \
-//    -framework UIKit -framework Foundation \
+//    -framework UIKit -framework Foundation -framework Security \
 //    DeviceIdHook.m fishhook.c -o DeviceIdHook.dylib
 //
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <Security/Security.h>
 #import <objc/runtime.h>
+#include "fishhook.h"
 
-// ─── Ayarlar ─────────────────────────────────────────────────────────────
-static NSString *const kTargetId  = @"77bc647fc7ccc3aec3cd94eace776e68fc23b1661774527271fd";
-static NSString *const kFakeId    = @"aabbccddeeff00112233445566778899aabbccddeeff00112233";
-
-// ═══════════════════════════════════════════════════════════════════════════
-// MARK: - Hook implementations
-// NOT: Bu fonksiyonlar constructor'dan önce tanımlanmalı
-// ═══════════════════════════════════════════════════════════════════════════
-
-static IMP orig_setValue;
-static IMP orig_setBody;
-static IMP orig_setURL;
-
-static NSString *replaceStr(NSString *s) {
-    if (!s || ![s containsString:kTargetId]) return s;
-    return [s stringByReplacingOccurrencesOfString:kTargetId withString:kFakeId];
-}
-
-static NSData *replaceData(NSData *data) {
-    if (!data) return data;
-    NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (!s || ![s containsString:kTargetId]) return data;
-    return [[s stringByReplacingOccurrencesOfString:kTargetId withString:kFakeId]
-            dataUsingEncoding:NSUTF8StringEncoding];
-}
-
-static void h_setValue(id self, SEL _cmd, NSString *val, NSString *field) {
-    NSString *replaced = replaceStr(val);
-    if (replaced != val)
-        NSLog(@"[DHook][SPOOF] Header %@: %@ → %@", field, val, replaced);
-    ((void(*)(id,SEL,NSString*,NSString*))orig_setValue)(self, _cmd, replaced, field);
-}
-
-static void h_setBody(id self, SEL _cmd, NSData *body) {
-    NSData *replaced = replaceData(body);
-    if (replaced != body) NSLog(@"[DHook][SPOOF] Body değiştirildi");
-    ((void(*)(id,SEL,NSData*))orig_setBody)(self, _cmd, replaced);
-}
-
-static void h_setURL(id self, SEL _cmd, NSURL *url) {
-    NSString *abs = url.absoluteString;
-    NSString *replaced = replaceStr(abs);
-    if (replaced != abs) {
-        NSLog(@"[DHook][SPOOF] URL değiştirildi");
-        url = [NSURL URLWithString:replaced];
-    }
-    ((void(*)(id,SEL,NSURL*))orig_setURL)(self, _cmd, url);
-}
+// ─── Fake değerler ────────────────────────────────────────────────────────
+// IDFV — UUID formatında, her cihaz için farklı görünmeli
+static NSString *const kFakeIdfv     = @"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
+// Cihaz adı
+static NSString *const kFakeName     = @"iPhone";
+// Model identifier
+static NSString *const kFakeModel    = @"iPhone15,2";
+// System version
+static NSString *const kFakeSysVer   = @"17.0";
+// Keychain'deki lm_new_device_deviceIdentifier için fake hex (52 char)
+static NSString *const kFakeDeviceId = @"aabbccddeeff00112233445566778899aabbccddeeff00112233";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MARK: - Overlay (sadece log göstermek için, spoof'tan bağımsız)
+// MARK: - Minimal overlay (opsiyonel, spoof'tan bağımsız)
 // ═══════════════════════════════════════════════════════════════════════════
 
 @interface DHOverlay : UIWindow
 + (instancetype)shared;
-- (void)addLog:(NSString *)msg;
+- (void)log:(NSString *)msg;
 @end
 
 @implementation DHOverlay {
-    UILabel *_stats; UITextView *_tv; UIView *_panel; UIButton *_minBtn;
-    NSMutableString *_logs; BOOL _min;
+    UITextView *_tv; UIView *_panel; UIButton *_minBtn;
+    NSMutableString *_buf; BOOL _min;
 }
 + (instancetype)shared {
     static DHOverlay *i; static dispatch_once_t t;
@@ -81,7 +47,7 @@ static void h_setURL(id self, SEL _cmd, NSURL *url) {
         i = [[DHOverlay alloc] initWithFrame:UIScreen.mainScreen.bounds];
         i.windowLevel = UIWindowLevelAlert + 100;
         i.backgroundColor = UIColor.clearColor;
-        i->_logs = [NSMutableString string];
+        i->_buf = [NSMutableString string];
         [i buildUI]; i.hidden = NO;
     }); return i;
 }
@@ -91,14 +57,14 @@ static void h_setURL(id self, SEL _cmd, NSURL *url) {
 }
 - (void)buildUI {
     CGFloat W = UIScreen.mainScreen.bounds.size.width;
-    _panel = [[UIView alloc] initWithFrame:CGRectMake(8,60,W-16,280)];
+    _panel = [[UIView alloc] initWithFrame:CGRectMake(8,60,W-16,260)];
     _panel.backgroundColor = [UIColor colorWithRed:0.04 green:0.04 blue:0.07 alpha:0.95];
     _panel.layer.cornerRadius = 12; _panel.clipsToBounds = YES;
 
     UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0,0,W-16,36)];
     bar.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:1];
-    UILabel *ttl = [[UILabel alloc] initWithFrame:CGRectMake(12,10,W-100,16)];
-    ttl.text = @"🎭 deviceId Spoof"; ttl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+    UILabel *ttl = [[UILabel alloc] initWithFrame:CGRectMake(10,10,W-100,16)];
+    ttl.text = @"🔧 Device Spoof"; ttl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
     ttl.textColor = [UIColor colorWithWhite:0.9 alpha:1]; [bar addSubview:ttl];
     _minBtn = [UIButton buttonWithType:UIButtonTypeCustom]; _minBtn.frame = CGRectMake(W-16-40,6,36,24);
     [_minBtn setTitle:@"−" forState:UIControlStateNormal];
@@ -107,25 +73,19 @@ static void h_setURL(id self, SEL _cmd, NSURL *url) {
     [_minBtn addTarget:self action:@selector(toggleMin) forControlEvents:UIControlEventTouchUpInside];
     [bar addSubview:_minBtn]; [_panel addSubview:bar];
 
-    _stats = [[UILabel alloc] initWithFrame:CGRectMake(8,38,W-32,16)];
-    _stats.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
-    _stats.textColor = [UIColor colorWithWhite:0.45 alpha:1];
-    _stats.text = [NSString stringWithFormat:@"fake: %.16s…", kFakeId.UTF8String];
-    [_panel addSubview:_stats];
-
-    _tv = [[UITextView alloc] initWithFrame:CGRectMake(0,56,W-16,280-56-36)];
+    _tv = [[UITextView alloc] initWithFrame:CGRectMake(0,36,W-16,260-36-36)];
     _tv.backgroundColor = UIColor.clearColor; _tv.editable = NO; _tv.selectable = NO;
     _tv.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
     _tv.textColor = [UIColor colorWithRed:0.85 green:0.85 blue:0.85 alpha:1];
     [_panel addSubview:_tv];
 
-    UIView *bot = [[UIView alloc] initWithFrame:CGRectMake(0,280-36,W-16,36)];
+    UIView *bot = [[UIView alloc] initWithFrame:CGRectMake(0,260-36,W-16,36)];
     bot.backgroundColor = [UIColor colorWithRed:0.06 green:0.06 blue:0.10 alpha:1];
     UIButton *clr = [UIButton buttonWithType:UIButtonTypeCustom]; clr.frame = CGRectMake(10,6,60,24);
     [clr setTitle:@"Temizle" forState:UIControlStateNormal];
     clr.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     [clr setTitleColor:[UIColor colorWithWhite:0.5 alpha:1] forState:UIControlStateNormal];
-    [clr addTarget:self action:@selector(clearLogs) forControlEvents:UIControlEventTouchUpInside];
+    [clr addTarget:self action:@selector(clear) forControlEvents:UIControlEventTouchUpInside];
     [bot addSubview:clr];
     UIButton *cpy = [UIButton buttonWithType:UIButtonTypeCustom]; cpy.frame = CGRectMake(W-16-80,4,72,28);
     [cpy setTitle:@"📋 Kopyala" forState:UIControlStateNormal];
@@ -133,22 +93,22 @@ static void h_setURL(id self, SEL _cmd, NSURL *url) {
     [cpy setTitleColor:[UIColor colorWithRed:0.47 green:0.75 blue:1.0 alpha:1] forState:UIControlStateNormal];
     cpy.layer.borderWidth=0.5; cpy.layer.cornerRadius=6;
     cpy.layer.borderColor=[UIColor colorWithRed:0.47 green:0.75 blue:1.0 alpha:0.4].CGColor;
-    [cpy addTarget:self action:@selector(copyLogs) forControlEvents:UIControlEventTouchUpInside];
+    [cpy addTarget:self action:@selector(copy) forControlEvents:UIControlEventTouchUpInside];
     [bot addSubview:cpy]; [_panel addSubview:bot];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
     [bar addGestureRecognizer:pan]; [self addSubview:_panel];
 }
-- (void)addLog:(NSString *)msg {
+- (void)log:(NSString *)msg {
     NSDateFormatter *f = [NSDateFormatter new]; f.dateFormat = @"HH:mm:ss";
-    [_logs appendFormat:@"[%@] %@\n", [f stringFromDate:[NSDate date]], msg];
-    _tv.text = _logs;
-    [_tv scrollRangeToVisible:NSMakeRange(_logs.length, 0)];
+    [_buf appendFormat:@"[%@] %@\n", [f stringFromDate:[NSDate date]], msg];
+    _tv.text = _buf;
+    [_tv scrollRangeToVisible:NSMakeRange(_buf.length, 0)];
 }
-- (void)clearLogs { [_logs setString:@""]; _tv.text = @""; }
-- (void)copyLogs { [UIPasteboard generalPasteboard].string = _logs; }
+- (void)clear { [_buf setString:@""]; _tv.text = @""; }
+- (void)copy  { [UIPasteboard generalPasteboard].string = _buf; }
 - (void)toggleMin {
-    _min = !_min; CGRect f = _panel.frame; f.size.height = _min ? 36 : 280;
+    _min = !_min; CGRect f = _panel.frame; f.size.height = _min ? 36 : 260;
     [UIView animateWithDuration:0.2 animations:^{ self->_panel.frame = f; }];
     [_minBtn setTitle:_min ? @"+" : @"−" forState:UIControlStateNormal];
 }
@@ -160,33 +120,133 @@ static void h_setURL(id self, SEL _cmd, NSURL *url) {
 }
 @end
 
+static void uiLog(NSString *msg) {
+    NSLog(@"[DHook] %@", msg);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[DHOverlay shared] log:msg];
+    });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// MARK: - Constructor
-// Hook'lar burada kurulur — ObjC runtime bu noktada hazır
-// UI ayrıca 1 sn sonra yüklenir
+// MARK: - Hook implementations
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── 1. UIDevice.identifierForVendor ──────────────────────────────────────
+static IMP orig_idfv;
+static NSUUID *h_idfv(id self, SEL _cmd) {
+    uiLog([NSString stringWithFormat:@"SPOOF identifierForVendor → %@", kFakeIdfv]);
+    return [[NSUUID alloc] initWithUUIDString:kFakeIdfv];
+}
+
+// ── 2. UIDevice.name ─────────────────────────────────────────────────────
+static IMP orig_name;
+static NSString *h_name(id self, SEL _cmd) {
+    return kFakeName;
+}
+
+// ── 3. UIDevice.model ────────────────────────────────────────────────────
+static IMP orig_model;
+static NSString *h_model(id self, SEL _cmd) {
+    return kFakeModel;
+}
+
+// ── 4. UIDevice.systemVersion ────────────────────────────────────────────
+static IMP orig_sysver;
+static NSString *h_sysver(id self, SEL _cmd) {
+    return kFakeSysVer;
+}
+
+// ── 5. Keychain SecItemCopyMatching ──────────────────────────────────────
+//    lm_new_device_deviceIdentifier okunduğunda fake değer döndür
+typedef OSStatus (*SecCopyFn)(CFDictionaryRef, CFTypeRef *);
+static SecCopyFn orig_SecItemCopyMatching;
+
+static OSStatus h_SecItemCopyMatching(CFDictionaryRef q, CFTypeRef *res) {
+    OSStatus st = orig_SecItemCopyMatching(q, res);
+    if (st != errSecSuccess || !res || !*res) return st;
+
+    NSString *acc = (__bridge NSString *)CFDictionaryGetValue(q, kSecAttrAccount);
+    if (![acc isEqualToString:@"lm_new_device_deviceIdentifier"]) return st;
+
+    // Orijinal hex değeri logla, fake döndür
+    NSData *fakeData = nil;
+    NSMutableData *d = [NSMutableData data];
+    NSString *hex = kFakeDeviceId;
+    for (NSUInteger i = 0; i + 1 < hex.length; i += 2) {
+        unsigned int byte = 0;
+        [[NSScanner scannerWithString:[hex substringWithRange:NSMakeRange(i,2)]] scanHexInt:&byte];
+        uint8_t b = (uint8_t)byte; [d appendBytes:&b length:1];
+    }
+    fakeData = d;
+
+    CFTypeID tid = CFGetTypeID(*res);
+    if (tid == CFDataGetTypeID()) {
+        CFRelease(*res); *res = (__bridge_retained CFTypeRef)fakeData;
+        uiLog(@"SPOOF Keychain lm_new_device_deviceIdentifier");
+    } else if (tid == CFDictionaryGetTypeID()) {
+        NSMutableDictionary *dict = [(__bridge NSDictionary *)*res mutableCopy];
+        dict[(id)kSecValueData] = fakeData;
+        CFRelease(*res); *res = (__bridge_retained CFTypeRef)[dict copy];
+        uiLog(@"SPOOF Keychain lm_new_device_deviceIdentifier (dict)");
+    }
+    return st;
+}
+
+// ── 6. NSUserDefaults — device ile ilgili key'ler ────────────────────────
+static IMP orig_objectForKey;
+static id h_objectForKey(id self, SEL _cmd, NSString *key) {
+    id val = ((id(*)(id,SEL,NSString*))orig_objectForKey)(self, _cmd, key);
+    // kMATUserDefaultDeviceIDKey gibi device key'lerini spoof et
+    if ([key containsString:@"DeviceID"] || [key containsString:@"deviceId"] ||
+        [key containsString:@"device_id"]) {
+        if ([val isKindOfClass:[NSString class]]) {
+            uiLog([NSString stringWithFormat:@"SPOOF NSUserDefaults[%@]", key]);
+            return kFakeDeviceId;
+        }
+    }
+    return val;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MARK: - Constructor — anında devreye gir
 // ═══════════════════════════════════════════════════════════════════════════
 
 __attribute__((constructor))
 static void init(void) {
-    // Foundation sınıfları dylib load'da hazır, swizzle güvenli
-    Class cls = [NSMutableURLRequest class];
+    // UIDevice swizzle — Foundation/UIKit constructor'da yüklü
+    Class dev = [UIDevice class];
 
-    Method m1 = class_getInstanceMethod(cls, @selector(setValue:forHTTPHeaderField:));
-    if (m1) { orig_setValue = method_getImplementation(m1); method_setImplementation(m1, (IMP)h_setValue); }
+    Method m;
+    m = class_getInstanceMethod(dev, @selector(identifierForVendor));
+    if (m) { orig_idfv   = method_getImplementation(m); method_setImplementation(m, (IMP)h_idfv); }
 
-    Method m2 = class_getInstanceMethod(cls, @selector(setHTTPBody:));
-    if (m2) { orig_setBody = method_getImplementation(m2); method_setImplementation(m2, (IMP)h_setBody); }
+    m = class_getInstanceMethod(dev, @selector(name));
+    if (m) { orig_name   = method_getImplementation(m); method_setImplementation(m, (IMP)h_name); }
 
-    Method m3 = class_getInstanceMethod(cls, @selector(setURL:));
-    if (m3) { orig_setURL = method_getImplementation(m3); method_setImplementation(m3, (IMP)h_setURL); }
+    m = class_getInstanceMethod(dev, @selector(model));
+    if (m) { orig_model  = method_getImplementation(m); method_setImplementation(m, (IMP)h_model); }
 
-    NSLog(@"[DHook] Hook'lar kuruldu. Hedef: %@", kTargetId);
+    m = class_getInstanceMethod(dev, @selector(systemVersion));
+    if (m) { orig_sysver = method_getImplementation(m); method_setImplementation(m, (IMP)h_sysver); }
 
-    // UI geç yükle — crash olmaz
+    // NSUserDefaults
+    m = class_getInstanceMethod([NSUserDefaults class], @selector(objectForKey:));
+    if (m) { orig_objectForKey = method_getImplementation(m); method_setImplementation(m, (IMP)h_objectForKey); }
+
+    // Keychain — fishhook
+    struct rebinding bindings[] = {
+        {"SecItemCopyMatching", h_SecItemCopyMatching, (void **)&orig_SecItemCopyMatching},
+    };
+    rebind_symbols(bindings, 1);
+
+    NSLog(@"[DHook] Device spoof hook'ları kuruldu");
+
+    // UI 1 sn sonra yükle
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [[DHOverlay shared] addLog:@"✅ Spoof aktif"];
-        [[DHOverlay shared] addLog:[NSString stringWithFormat:@"Hedef: %.16s…", kTargetId.UTF8String]];
-        [[DHOverlay shared] addLog:[NSString stringWithFormat:@"Fake : %.16s…", kFakeId.UTF8String]];
+        [[DHOverlay shared] log:@"✅ Device spoof aktif"];
+        [[DHOverlay shared] log:[NSString stringWithFormat:@"IDFV  → %@", kFakeIdfv]];
+        [[DHOverlay shared] log:[NSString stringWithFormat:@"Model → %@", kFakeModel]];
+        [[DHOverlay shared] log:[NSString stringWithFormat:@"ID    → %.16s…", kFakeDeviceId.UTF8String]];
     });
 }
