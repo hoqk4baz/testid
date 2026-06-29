@@ -1,42 +1,51 @@
-//
-//  DeviceIdHook.m — Sadece UIDevice swizzle, fishhook yok
-//  Crash izolasyonu için minimal test versiyonu
-//
-//  Build:
-//  clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-//    -miphoneos-version-min=13.0 -shared -fobjc-arc -O2 \
-//    -framework UIKit -framework Foundation \
-//    DeviceIdHook.m -o DeviceIdHook.dylib
-//
+// iokit_logger.c
+#include <stdio.h>
+#include <dlfcn.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include "fishhook.h"
 
-#import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
-#import <objc/runtime.h>
+// IOKit tipleri (header'a bağımlı olmamak için minimal tanım)
+typedef unsigned int io_registry_entry_t;
+typedef unsigned int IOOptionBits;
 
-static NSString *const kFakeIdfv  = @"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
-static NSString *const kFakeName  = @"iPhone";
-static NSString *const kFakeModel = @"iPhone15,2";
+static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(
+    io_registry_entry_t entry, CFStringRef key,
+    CFAllocatorRef allocator, IOOptionBits options);
 
-static IMP orig_idfv, orig_name, orig_model;
-
-static NSUUID *h_idfv(id self, SEL _cmd) {
-    return [[NSUUID alloc] initWithUUIDString:kFakeIdfv];
+static void log_cfstring(const char *prefix, CFStringRef s) {
+    if (!s) { fprintf(stderr, "%s(null)\n", prefix); return; }
+    char buf[512];
+    if (CFStringGetCString(s, buf, sizeof(buf), kCFStringEncodingUTF8))
+        fprintf(stderr, "%s%s\n", prefix, buf);
+    else
+        fprintf(stderr, "%s<non-utf8>\n", prefix);
 }
-static NSString *h_name(id self, SEL _cmd)  { return kFakeName; }
-static NSString *h_model(id self, SEL _cmd) { return kFakeModel; }
 
-@interface DHInstaller : NSObject
-@end
-@implementation DHInstaller
-+ (void)load {
-    Class dev = [UIDevice class];
-    Method m;
-    m = class_getInstanceMethod(dev, @selector(identifierForVendor));
-    if (m) { orig_idfv  = method_getImplementation(m); method_setImplementation(m, (IMP)h_idfv); }
-    m = class_getInstanceMethod(dev, @selector(name));
-    if (m) { orig_name  = method_getImplementation(m); method_setImplementation(m, (IMP)h_name); }
-    m = class_getInstanceMethod(dev, @selector(model));
-    if (m) { orig_model = method_getImplementation(m); method_setImplementation(m, (IMP)h_model); }
-    NSLog(@"[DHook] UIDevice hook'ları kuruldu");
+static CFTypeRef my_IORegistryEntryCreateCFProperty(
+    io_registry_entry_t entry, CFStringRef key,
+    CFAllocatorRef allocator, IOOptionBits options) {
+
+    CFTypeRef result = orig_IORegistryEntryCreateCFProperty(
+        entry, key, allocator, options);
+
+    log_cfstring("[IOKit] property requested: ", key);
+
+    if (result && CFGetTypeID(result) == CFStringGetTypeID()) {
+        log_cfstring("[IOKit]   -> value: ", (CFStringRef)result);
+    } else if (result) {
+        fprintf(stderr, "[IOKit]   -> value: <non-string CFType>\n");
+    } else {
+        fprintf(stderr, "[IOKit]   -> value: (null)\n");
+    }
+    return result;
 }
-@end
+
+__attribute__((constructor))
+static void init(void) {
+    fprintf(stderr, "[IOKit] logger dylib loaded\n");
+    rebind_symbols((struct rebinding[1]){
+        {"IORegistryEntryCreateCFProperty",
+         my_IORegistryEntryCreateCFProperty,
+         (void *)&orig_IORegistryEntryCreateCFProperty}
+    }, 1);
+}
