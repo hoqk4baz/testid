@@ -1,14 +1,7 @@
-# .github/workflows/build-dylib.yml
 name: build-iokit-logger
 
 on:
-  workflow_dispatch: {}      # Actions sekmesinden manuel tetikle
-  push:
-    paths:
-      - "iokit_logger.m"
-      - "fishhook.c"
-      - "fishhook.h"
-      - ".github/workflows/build-dylib.yml"
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,10 +10,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show toolchain
+      - name: List files
+        run: ls -la
+
+      - name: Fetch fishhook
         run: |
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
+          curl -fsSL -O https://raw.githubusercontent.com/facebook/fishhook/master/fishhook.c
+          curl -fsSL -O https://raw.githubusercontent.com/facebook/fishhook/master/fishhook.h
 
       - name: Compile dylib
         run: |
@@ -36,18 +32,11 @@ jobs:
             iokit_logger.m fishhook.c
 
       - name: Ad-hoc sign
-        run: |
-          codesign -f -s - --timestamp=none iokit_logger.dylib
-          codesign -dv iokit_logger.dylib || true
-
-      - name: Verify output
-        run: |
-          file iokit_logger.dylib
-          otool -L iokit_logger.dylib
+        run: codesign -f -s - iokit_logger.dylib
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: iokit_logger
           path: iokit_logger.dylib
-          if-no-found: error
+          if-no-files-found: error
