@@ -1,49 +1,23 @@
-name: Build DeviceIdHook dylib
-
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+# .github/workflows/build-dylib.yml
+name: build-iokit-logger
+on: { workflow_dispatch: {} }
 
 jobs:
   build:
     runs-on: macos-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Install fishhook
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h -o fishhook.h
-          curl -fsSL https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c -o fishhook.c
-
-      - name: Build dylib (arm64)
+      - uses: actions/checkout@v4
+      - name: Compile dylib
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-
-          clang \
-            -arch arm64 \
+          clang -arch arm64 -dynamiclib \
             -isysroot "$SDK" \
-            -miphoneos-version-min=13.0 \
-            -shared \
-            -fmodules \
-            -fobjc-arc \
-            -O2 \
-            -framework UIKit \
-            -framework Foundation \
-            -framework Security \
-            -framework CoreFoundation \
-            DeviceIdHook.m \
-            fishhook.c \
-            -o DeviceIdHook.dylib
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+            -framework CoreFoundation -framework IOKit \
+            -o iokit_logger.dylib \
+            iokit_logger.c fishhook.c
+          # Sideload için ad-hoc imza
+          codesign -f -s - iokit_logger.dylib
+      - uses: actions/upload-artifact@v4
         with:
-          name: DeviceIdHook-dylib
-          path: DeviceIdHook.dylib
-          retention-days: 7
+          name: iokit_logger
+          path: iokit_logger.dylib
