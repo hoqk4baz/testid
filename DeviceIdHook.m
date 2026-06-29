@@ -93,7 +93,7 @@ static NSString *const kFakeDeviceId = @"aabbccddeeff00112233445566778899aabbccd
     [cpy setTitleColor:[UIColor colorWithRed:0.47 green:0.75 blue:1.0 alpha:1] forState:UIControlStateNormal];
     cpy.layer.borderWidth=0.5; cpy.layer.cornerRadius=6;
     cpy.layer.borderColor=[UIColor colorWithRed:0.47 green:0.75 blue:1.0 alpha:0.4].CGColor;
-    [cpy addTarget:self action:@selector(copy) forControlEvents:UIControlEventTouchUpInside];
+    [cpy addTarget:self action:@selector(copyLogs) forControlEvents:UIControlEventTouchUpInside];
     [bot addSubview:cpy]; [_panel addSubview:bot];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
@@ -106,7 +106,7 @@ static NSString *const kFakeDeviceId = @"aabbccddeeff00112233445566778899aabbccd
     [_tv scrollRangeToVisible:NSMakeRange(_buf.length, 0)];
 }
 - (void)clear { [_buf setString:@""]; _tv.text = @""; }
-- (void)copy  { [UIPasteboard generalPasteboard].string = _buf; }
+- (void)copyLogs { [UIPasteboard generalPasteboard].string = _buf; }
 - (void)toggleMin {
     _min = !_min; CGRect f = _panel.frame; f.size.height = _min ? 36 : 260;
     [UIView animateWithDuration:0.2 animations:^{ self->_panel.frame = f; }];
