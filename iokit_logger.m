@@ -67,7 +67,7 @@ static kern_return_t my_IORegistryEntryCreateCFProperties(
     return r;
 }
 
-#pragma mark - identifierForVendor & keychain hooks
+#pragma mark - identifierForVendor hook
 
 static NSUUID *(*orig_idfv)(id, SEL);
 static NSUUID *my_idfv(id self, SEL _cmd) {
@@ -76,13 +76,43 @@ static NSUUID *my_idfv(id self, SEL _cmd) {
     return r;
 }
 
+#pragma mark - keychain hooks (read + write)
+
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
 static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     OSStatus s = orig_SecItemCopyMatching(query, result);
     CFTypeRef acct = query ? CFDictionaryGetValue(query, kSecAttrAccount) : NULL;
     NSString *a = (acct && CFGetTypeID(acct) == CFStringGetTypeID())
         ? (__bridge NSString *)acct : @"(?)";
-    appendLog([NSString stringWithFormat:@"[Keychain] read account=%@ status=%d", a, (int)s]);
+
+    NSString *val = @"";
+    if (s == 0 && result && *result && [a containsString:@"device"]) {
+        if (CFGetTypeID(*result) == CFDataGetTypeID()) {
+            NSData *d = (__bridge NSData *)*result;
+            NSString *str = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+            val = str ? [NSString stringWithFormat:@" value=%@", str]
+                      : [NSString stringWithFormat:@" value=<%lu bytes>", (unsigned long)d.length];
+        }
+    }
+    appendLog([NSString stringWithFormat:@"[KC-read] account=%@ status=%d%@", a, (int)s, val]);
+    return s;
+}
+
+static OSStatus (*orig_SecItemAdd)(CFDictionaryRef, CFTypeRef *);
+static OSStatus my_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+    OSStatus s = orig_SecItemAdd(attributes, result);
+    CFTypeRef acct = attributes ? CFDictionaryGetValue(attributes, kSecAttrAccount) : NULL;
+    NSString *a = (acct && CFGetTypeID(acct) == CFStringGetTypeID())
+        ? (__bridge NSString *)acct : @"(?)";
+
+    NSString *val = @"";
+    CFTypeRef data = attributes ? CFDictionaryGetValue(attributes, kSecValueData) : NULL;
+    if (data && CFGetTypeID(data) == CFDataGetTypeID()) {
+        NSString *str = [[NSString alloc] initWithData:(__bridge NSData *)data
+                                              encoding:NSUTF8StringEncoding];
+        val = str ? [NSString stringWithFormat:@" value=%@", str] : @" value=<binary>";
+    }
+    appendLog([NSString stringWithFormat:@"[KC-WRITE] account=%@ status=%d%@", a, (int)s, val]);
     return s;
 }
 
@@ -165,7 +195,7 @@ static void setupOverlay(void) {
 
 __attribute__((constructor))
 static void init_logger(void) {
-    rebind_symbols((struct rebinding[4]){
+    rebind_symbols((struct rebinding[5]){
         {"IORegistryEntryCreateCFProperty",
          my_IORegistryEntryCreateCFProperty,
          (void *)&orig_IORegistryEntryCreateCFProperty},
@@ -177,8 +207,11 @@ static void init_logger(void) {
          (void *)&orig_IORegistryEntryCreateCFProperties},
         {"SecItemCopyMatching",
          my_SecItemCopyMatching,
-         (void *)&orig_SecItemCopyMatching}
-    }, 4);
+         (void *)&orig_SecItemCopyMatching},
+        {"SecItemAdd",
+         my_SecItemAdd,
+         (void *)&orig_SecItemAdd}
+    }, 5);
 
     Method m = class_getInstanceMethod(UIDevice.class, @selector(identifierForVendor));
     if (m) {
