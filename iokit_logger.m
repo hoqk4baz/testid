@@ -21,10 +21,11 @@ void AddLog(NSString *text) {
     NSLog(@"%@", text);
 }
 
-#pragma mark - KEYCHAIN CLEAN
+#pragma mark - KEYCHAIN RESET
 
 void ClearKC(id cls, NSString *name) {
     NSDictionary *q = @{(__bridge id)kSecClass: cls};
+
     OSStatus s = SecItemDelete((__bridge CFDictionaryRef)q);
 
     if (s == errSecSuccess || s == errSecItemNotFound)
@@ -42,29 +43,48 @@ void ResetKeychain(void) {
     ClearKC((__bridge id)kSecClassKey, @"Key");
     ClearKC((__bridge id)kSecClassIdentity, @"Identity");
 
-    AddLog(@"Keychain reset done");
+    AddLog(@"Keychain reset finished");
 }
 
-#pragma mark - DRAG
+#pragma mark - ACTION HANDLER
+
+@interface ActionHandler : NSObject
+@end
+
+@implementation ActionHandler
+
++ (void)copyLogs {
+    UIPasteboard.generalPasteboard.string = logs;
+    AddLog(@"Copied to clipboard");
+}
+
++ (void)clearLogs {
+    [logs setString:@""];
+    logView.text = @"";
+    AddLog(@"Logs cleared");
+}
+
+@end
+
+#pragma mark - DRAG VIEW
 
 @interface DragView : UIView
 @end
 
 @implementation DragView {
-    CGPoint start;
+    CGPoint startPoint;
 }
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
-    start = [[touches anyObject] locationInView:self];
+    startPoint = [[touches anyObject] locationInView:self];
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
     CGPoint p = [[touches anyObject] locationInView:self.superview];
 
     CGRect f = self.frame;
-    f.origin.x = p.x - start.x;
-    f.origin.y = p.y - start.y;
-
+    f.origin.x = p.x - startPoint.x;
+    f.origin.y = p.y - startPoint.y;
     self.frame = f;
 }
 
@@ -79,47 +99,51 @@ void ShowFloating(void) {
         window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         window.windowLevel = UIWindowLevelAlert + 1;
         window.backgroundColor = UIColor.clearColor;
-        window.rootViewController = [UIViewController new];
-        window.hidden = NO;
+
+        UIViewController *vc = [UIViewController new];
+        vc.view.backgroundColor = UIColor.clearColor;
+        window.rootViewController = vc;
+
         [window makeKeyAndVisible];
 
-        // küçük panel
-        panel = [[DragView alloc] initWithFrame:CGRectMake(20, 100, 260, 220)];
+        // PANEL
+        panel = [[DragView alloc] initWithFrame:CGRectMake(30, 120, 260, 220)];
         panel.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
         panel.layer.cornerRadius = 12;
         panel.clipsToBounds = YES;
 
-        [window.rootViewController.view addSubview:panel];
+        [vc.view addSubview:panel];
 
-        // log view
+        // LOG VIEW
         logView = [[UITextView alloc] initWithFrame:CGRectMake(10, 10, 240, 150)];
         logView.backgroundColor = UIColor.clearColor;
         logView.textColor = UIColor.greenColor;
         logView.font = [UIFont systemFontOfSize:11];
         logView.editable = NO;
+
         [panel addSubview:logView];
 
-        // COPY
+        // COPY BUTTON
         UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
         copy.frame = CGRectMake(10, 170, 60, 30);
         [copy setTitle:@"Copy" forState:UIControlStateNormal];
-        [copy addTarget:^(id sender){
-            UIPasteboard.generalPasteboard.string = logs;
-            AddLog(@"Copied");
-        } forControlEvents:UIControlEventTouchUpInside];
+        [copy addTarget:[ActionHandler class]
+                 action:@selector(copyLogs)
+       forControlEvents:UIControlEventTouchUpInside];
+
         [panel addSubview:copy];
 
-        // CLEAR
+        // CLEAR BUTTON
         UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
         clear.frame = CGRectMake(80, 170, 60, 30);
         [clear setTitle:@"Clear" forState:UIControlStateNormal];
-        [clear addTarget:^(id sender){
-            [logs setString:@""];
-            logView.text = @"";
-        } forControlEvents:UIControlEventTouchUpInside];
+        [clear addTarget:[ActionHandler class]
+                  action:@selector(clearLogs)
+        forControlEvents:UIControlEventTouchUpInside];
+
         [panel addSubview:clear];
 
-        AddLog(@"Floating log ready");
+        AddLog(@"Floating debugger ready");
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{
@@ -135,6 +159,6 @@ static void init() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         ShowFloating();
-        AddLog(@"App started");
+        AddLog(@"App initialized");
     });
 }
