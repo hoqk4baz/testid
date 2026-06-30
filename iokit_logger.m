@@ -46,7 +46,7 @@ void ResetKeychain(void) {
     AddLog(@"Keychain reset finished");
 }
 
-#pragma mark - ACTION HANDLER
+#pragma mark - ACTIONS
 
 @interface ActionHandler : NSObject
 @end
@@ -55,13 +55,13 @@ void ResetKeychain(void) {
 
 + (void)copyLogs {
     UIPasteboard.generalPasteboard.string = logs;
-    AddLog(@"Copied to clipboard");
+    AddLog(@"Copied");
 }
 
 + (void)clearLogs {
     [logs setString:@""];
     logView.text = @"";
-    AddLog(@"Logs cleared");
+    AddLog(@"Cleared");
 }
 
 @end
@@ -96,21 +96,23 @@ void ShowFloating(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
 
+        // IMPORTANT: Normal level -> app touch'ları bloklamaz
         window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        window.windowLevel = UIWindowLevelAlert + 1;
+        window.windowLevel = UIWindowLevelNormal + 1;
         window.backgroundColor = UIColor.clearColor;
 
         UIViewController *vc = [UIViewController new];
         vc.view.backgroundColor = UIColor.clearColor;
-        window.rootViewController = vc;
+        vc.view.userInteractionEnabled = YES;
 
+        window.rootViewController = vc;
         [window makeKeyAndVisible];
 
         // PANEL
-        panel = [[DragView alloc] initWithFrame:CGRectMake(30, 120, 260, 220)];
-        panel.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
+        panel = [[DragView alloc] initWithFrame:CGRectMake(40, 120, 260, 220)];
+        panel.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.92];
         panel.layer.cornerRadius = 12;
-        panel.clipsToBounds = YES;
+        panel.userInteractionEnabled = YES;
 
         [vc.view addSubview:panel];
 
@@ -120,10 +122,11 @@ void ShowFloating(void) {
         logView.textColor = UIColor.greenColor;
         logView.font = [UIFont systemFontOfSize:11];
         logView.editable = NO;
+        logView.userInteractionEnabled = YES;
 
         [panel addSubview:logView];
 
-        // COPY BUTTON
+        // COPY
         UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
         copy.frame = CGRectMake(10, 170, 60, 30);
         [copy setTitle:@"Copy" forState:UIControlStateNormal];
@@ -133,7 +136,7 @@ void ShowFloating(void) {
 
         [panel addSubview:copy];
 
-        // CLEAR BUTTON
+        // CLEAR
         UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
         clear.frame = CGRectMake(80, 170, 60, 30);
         [clear setTitle:@"Clear" forState:UIControlStateNormal];
@@ -143,7 +146,7 @@ void ShowFloating(void) {
 
         [panel addSubview:clear];
 
-        AddLog(@"Floating debugger ready");
+        AddLog(@"Floating debug ready");
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{
@@ -159,6 +162,6 @@ static void init() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         ShowFloating();
-        AddLog(@"App initialized");
+        AddLog(@"App started");
     });
 }
