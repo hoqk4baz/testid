@@ -5,15 +5,12 @@
 #import <objc/runtime.h>
 #import "fishhook.h"
 
-typedef unsigned int io_registry_entry_t;
-typedef unsigned int IOOptionBits;
 typedef int kern_return_t;
 
 static NSMutableString *gLogBuffer;
 static UITextView *gLogView;
 static UIWindow *gWindow;
 
-// İzlenecek tek anahtar
 static NSString * const kTargetAccount = @"lm_new_device_deviceIdentifier";
 
 static void appendLog(NSString *line) {
@@ -25,21 +22,43 @@ static void appendLog(NSString *line) {
     });
 }
 
-// NSData -> "utf8=... " ya da "len=N hex=..." biçiminde okunabilir döküm
+// NSData -> okunabilir döküm. bplist ise decode eder.
 static NSString *describeData(NSData *d) {
     if (!d) return @"(no-data)";
+
+    if (d.length >= 8) {
+        const unsigned char *b = d.bytes;
+        if (b[0]==0x62 && b[1]==0x70 && b[2]==0x6c && b[3]==0x69 &&
+            b[4]==0x73 && b[5]==0x74) {                       // "bplist"
+            NSError *err = nil;
+            id plist = [NSPropertyListSerialization
+                propertyListWithData:d options:NSPropertyListImmutable
+                              format:NULL error:&err];
+            if (plist) {
+                NSString *desc = [plist description];
+                NSString *un = @"";
+                @try {
+                    id obj = [NSKeyedUnarchiver unarchiveObjectWithData:d];
+                    if (obj) un = [NSString stringWithFormat:@"\n  unarchived=%@", obj];
+                } @catch (__unused NSException *e) {}
+                return [NSString stringWithFormat:@" bplist len=%lu\n  plist=%@%@",
+                        (unsigned long)d.length, desc, un];
+            }
+        }
+    }
+
     NSString *utf8 = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
     if (utf8) return [NSString stringWithFormat:@" utf8=%@", utf8];
-    const unsigned char *b = d.bytes;
+
+    const unsigned char *bb = d.bytes;
     NSMutableString *hex = [NSMutableString string];
-    for (NSUInteger i = 0; i < d.length; i++) [hex appendFormat:@"%02x", b[i]];
-    // base64 de ekleyelim; blob base64-encoded bir şey olabilir
+    for (NSUInteger i = 0; i < d.length; i++) [hex appendFormat:@"%02x", bb[i]];
     NSString *b64 = [d base64EncodedStringWithOptions:0];
     return [NSString stringWithFormat:@" len=%lu\n  hex=%@\n  b64=%@",
             (unsigned long)d.length, hex, b64];
 }
 
-#pragma mark - keychain hooks (sadece hedef anahtar loglanır)
+#pragma mark - keychain hooks (sadece hedef anahtar)
 
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
 static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
