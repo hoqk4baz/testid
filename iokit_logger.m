@@ -1,21 +1,17 @@
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
 
-static UIWindow *debugWindow;
+static UIWindow *window;
+static UIView *panel;
 static UITextView *logView;
 static NSMutableString *logs;
 
-#pragma mark - Logger
+#pragma mark - LOG
 
 void AddLog(NSString *text) {
     if (!logs) logs = [NSMutableString new];
 
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
-                      [NSDateFormatter localizedStringFromDate:[NSDate date]
-                                                     dateStyle:NSDateFormatterNoStyle
-                                                     timeStyle:NSDateFormatterMediumStyle],
-                      text];
-
+    NSString *line = [NSString stringWithFormat:@"• %@\n", text];
     [logs appendString:line];
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -25,110 +21,120 @@ void AddLog(NSString *text) {
     NSLog(@"%@", text);
 }
 
-#pragma mark - Keychain Reset
+#pragma mark - KEYCHAIN CLEAN
 
-void ResetKeychainClass(id secClass, NSString *name) {
+void ClearKC(id cls, NSString *name) {
+    NSDictionary *q = @{(__bridge id)kSecClass: cls};
+    OSStatus s = SecItemDelete((__bridge CFDictionaryRef)q);
 
-    NSDictionary *query = @{
-        (__bridge id)kSecClass: secClass
-    };
-
-    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
-
-    if (status == errSecSuccess || status == errSecItemNotFound) {
-        AddLog([NSString stringWithFormat:@"✔ %@ cleared", name]);
-    } else {
-        AddLog([NSString stringWithFormat:@"✖ %@ failed (%d)", name, (int)status]);
-    }
+    if (s == errSecSuccess || s == errSecItemNotFound)
+        AddLog([NSString stringWithFormat:@"✔ %@", name]);
+    else
+        AddLog([NSString stringWithFormat:@"✖ %@ (%d)", name, (int)s]);
 }
 
-void ResetAllKeychain(void) {
+void ResetKeychain(void) {
+    AddLog(@"Keychain reset started");
 
-    AddLog(@"Starting Keychain reset...");
+    ClearKC((__bridge id)kSecClassGenericPassword, @"GenericPassword");
+    ClearKC((__bridge id)kSecClassInternetPassword, @"InternetPassword");
+    ClearKC((__bridge id)kSecClassCertificate, @"Certificate");
+    ClearKC((__bridge id)kSecClassKey, @"Key");
+    ClearKC((__bridge id)kSecClassIdentity, @"Identity");
 
-    ResetKeychainClass((__bridge id)kSecClassGenericPassword, @"GenericPassword");
-    ResetKeychainClass((__bridge id)kSecClassInternetPassword, @"InternetPassword");
-    ResetKeychainClass((__bridge id)kSecClassCertificate, @"Certificate");
-    ResetKeychainClass((__bridge id)kSecClassKey, @"Key");
-    ResetKeychainClass((__bridge id)kSecClassIdentity, @"Identity");
-
-    AddLog(@"Keychain reset finished");
+    AddLog(@"Keychain reset done");
 }
+
+#pragma mark - DRAG
+
+@interface DragView : UIView
+@end
+
+@implementation DragView {
+    CGPoint start;
+}
+
+- (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+    start = [[touches anyObject] locationInView:self];
+}
+
+- (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
+    CGPoint p = [[touches anyObject] locationInView:self.superview];
+
+    CGRect f = self.frame;
+    f.origin.x = p.x - start.x;
+    f.origin.y = p.y - start.y;
+
+    self.frame = f;
+}
+
+@end
 
 #pragma mark - UI
 
-@interface DebugVC : UIViewController
-@end
-
-@implementation DebugVC
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-
-    self.view.backgroundColor = [UIColor blackColor];
-
-    logView = [[UITextView alloc] initWithFrame:CGRectMake(10, 60,
-                self.view.frame.size.width - 20,
-                self.view.frame.size.height - 120)];
-
-    logView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1];
-    logView.textColor = [UIColor greenColor];
-    logView.editable = NO;
-
-    [self.view addSubview:logView];
-
-    UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
-    copy.frame = CGRectMake(10, 20, 80, 30);
-    [copy setTitle:@"Copy" forState:UIControlStateNormal];
-    [copy addTarget:self action:@selector(copyLogs) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:copy];
-
-    UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
-    clear.frame = CGRectMake(100, 20, 80, 30);
-    [clear setTitle:@"Clear" forState:UIControlStateNormal];
-    [clear addTarget:self action:@selector(clearLogs) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:clear];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        ResetAllKeychain();
-    });
-}
-
-- (void)copyLogs {
-    UIPasteboard.generalPasteboard.string = logs;
-    AddLog(@"Logs copied to clipboard");
-}
-
-- (void)clearLogs {
-    [logs setString:@""];
-    logView.text = @"";
-}
-
-@end
-
-#pragma mark - Window
-
-void ShowDebugWindow(void) {
+void ShowFloating(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
 
-        debugWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        debugWindow.windowLevel = UIWindowLevelAlert + 100;
+        window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        window.windowLevel = UIWindowLevelAlert + 1;
+        window.backgroundColor = UIColor.clearColor;
+        window.rootViewController = [UIViewController new];
+        window.hidden = NO;
+        [window makeKeyAndVisible];
 
-        debugWindow.rootViewController = [DebugVC new];
-        [debugWindow makeKeyAndVisible];
+        // küçük panel
+        panel = [[DragView alloc] initWithFrame:CGRectMake(20, 100, 260, 220)];
+        panel.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
+        panel.layer.cornerRadius = 12;
+        panel.clipsToBounds = YES;
 
-        AddLog(@"Debug window started");
+        [window.rootViewController.view addSubview:panel];
+
+        // log view
+        logView = [[UITextView alloc] initWithFrame:CGRectMake(10, 10, 240, 150)];
+        logView.backgroundColor = UIColor.clearColor;
+        logView.textColor = UIColor.greenColor;
+        logView.font = [UIFont systemFontOfSize:11];
+        logView.editable = NO;
+        [panel addSubview:logView];
+
+        // COPY
+        UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
+        copy.frame = CGRectMake(10, 170, 60, 30);
+        [copy setTitle:@"Copy" forState:UIControlStateNormal];
+        [copy addTarget:^(id sender){
+            UIPasteboard.generalPasteboard.string = logs;
+            AddLog(@"Copied");
+        } forControlEvents:UIControlEventTouchUpInside];
+        [panel addSubview:copy];
+
+        // CLEAR
+        UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
+        clear.frame = CGRectMake(80, 170, 60, 30);
+        [clear setTitle:@"Clear" forState:UIControlStateNormal];
+        [clear addTarget:^(id sender){
+            [logs setString:@""];
+            logView.text = @"";
+        } forControlEvents:UIControlEventTouchUpInside];
+        [panel addSubview:clear];
+
+        AddLog(@"Floating log ready");
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            ResetKeychain();
+        });
     });
 }
 
-#pragma mark - Entry
+#pragma mark - ENTRY
 
 __attribute__((constructor))
 static void init() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
-        ShowDebugWindow();
-        AddLog(@"App initialized");
+        ShowFloating();
+        AddLog(@"App started");
     });
 }
