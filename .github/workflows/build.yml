@@ -32,6 +32,7 @@ jobs:
             -framework UIKit \
             -framework CoreFoundation \
             -framework IOKit \
+            -framework Security \
             -o iokit_logger.dylib \
             iokit_logger.m fishhook.c
 
