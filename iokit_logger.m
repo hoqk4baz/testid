@@ -13,6 +13,9 @@ static NSMutableString *gLogBuffer;
 static UITextView *gLogView;
 static UIWindow *gWindow;
 
+// İzlenecek tek anahtar
+static NSString * const kTargetAccount = @"lm_new_device_deviceIdentifier";
+
 static void appendLog(NSString *line) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!gLogBuffer) gLogBuffer = [NSMutableString string];
@@ -22,79 +25,37 @@ static void appendLog(NSString *line) {
     });
 }
 
-#pragma mark - IOKit hooks
-
-static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(
-    io_registry_entry_t, CFStringRef, CFAllocatorRef, IOOptionBits);
-static CFTypeRef my_IORegistryEntryCreateCFProperty(
-    io_registry_entry_t entry, CFStringRef key,
-    CFAllocatorRef allocator, IOOptionBits options) {
-    CFTypeRef result = orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
-    NSString *k = key ? (__bridge NSString *)key : @"(null)";
-    NSString *v = (result && CFGetTypeID(result) == CFStringGetTypeID())
-        ? (__bridge NSString *)result : (result ? @"<non-string>" : @"(null)");
-    appendLog([NSString stringWithFormat:@"[Create] %@ = %@", k, v]);
-    return result;
+// NSData -> "utf8=... " ya da "len=N hex=..." biçiminde okunabilir döküm
+static NSString *describeData(NSData *d) {
+    if (!d) return @"(no-data)";
+    NSString *utf8 = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (utf8) return [NSString stringWithFormat:@" utf8=%@", utf8];
+    const unsigned char *b = d.bytes;
+    NSMutableString *hex = [NSMutableString string];
+    for (NSUInteger i = 0; i < d.length; i++) [hex appendFormat:@"%02x", b[i]];
+    // base64 de ekleyelim; blob base64-encoded bir şey olabilir
+    NSString *b64 = [d base64EncodedStringWithOptions:0];
+    return [NSString stringWithFormat:@" len=%lu\n  hex=%@\n  b64=%@",
+            (unsigned long)d.length, hex, b64];
 }
 
-static CFTypeRef (*orig_IORegistryEntrySearchCFProperty)(
-    io_registry_entry_t, const char *, CFStringRef, CFAllocatorRef, IOOptionBits);
-static CFTypeRef my_IORegistryEntrySearchCFProperty(
-    io_registry_entry_t entry, const char *plane, CFStringRef key,
-    CFAllocatorRef allocator, IOOptionBits options) {
-    CFTypeRef result = orig_IORegistryEntrySearchCFProperty(entry, plane, key, allocator, options);
-    NSString *k = key ? (__bridge NSString *)key : @"(null)";
-    NSString *v = (result && CFGetTypeID(result) == CFStringGetTypeID())
-        ? (__bridge NSString *)result : (result ? @"<non-string>" : @"(null)");
-    appendLog([NSString stringWithFormat:@"[Search] %@ = %@", k, v]);
-    return result;
-}
-
-static kern_return_t (*orig_IORegistryEntryCreateCFProperties)(
-    io_registry_entry_t, CFMutableDictionaryRef *, CFAllocatorRef, IOOptionBits);
-static kern_return_t my_IORegistryEntryCreateCFProperties(
-    io_registry_entry_t entry, CFMutableDictionaryRef *props,
-    CFAllocatorRef allocator, IOOptionBits options) {
-    kern_return_t r = orig_IORegistryEntryCreateCFProperties(entry, props, allocator, options);
-    if (r == 0 && props && *props) {
-        for (NSString *key in @[@"IOPlatformSerialNumber", @"IOPlatformUUID"]) {
-            CFTypeRef val = CFDictionaryGetValue(*props, (__bridge CFStringRef)key);
-            if (val && CFGetTypeID(val) == CFStringGetTypeID())
-                appendLog([NSString stringWithFormat:@"[Props] %@ = %@",
-                    key, (__bridge NSString *)val]);
-        }
-    }
-    return r;
-}
-
-#pragma mark - identifierForVendor hook
-
-static NSUUID *(*orig_idfv)(id, SEL);
-static NSUUID *my_idfv(id self, SEL _cmd) {
-    NSUUID *r = orig_idfv(self, _cmd);
-    appendLog([NSString stringWithFormat:@"[IDFV] %@", r.UUIDString]);
-    return r;
-}
-
-#pragma mark - keychain hooks (read + write)
+#pragma mark - keychain hooks (sadece hedef anahtar loglanır)
 
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
 static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     OSStatus s = orig_SecItemCopyMatching(query, result);
     CFTypeRef acct = query ? CFDictionaryGetValue(query, kSecAttrAccount) : NULL;
-    NSString *a = (acct && CFGetTypeID(acct) == CFStringGetTypeID())
-        ? (__bridge NSString *)acct : @"(?)";
-
-    NSString *val = @"";
-    if (s == 0 && result && *result && [a containsString:@"device"]) {
-        if (CFGetTypeID(*result) == CFDataGetTypeID()) {
-            NSData *d = (__bridge NSData *)*result;
-            NSString *str = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-            val = str ? [NSString stringWithFormat:@" value=%@", str]
-                      : [NSString stringWithFormat:@" value=<%lu bytes>", (unsigned long)d.length];
+    if (acct && CFGetTypeID(acct) == CFStringGetTypeID()) {
+        NSString *a = (__bridge NSString *)acct;
+        if ([a isEqualToString:kTargetAccount]) {
+            NSString *val = @" (value döndürülmedi)";
+            if (s == 0 && result && *result &&
+                CFGetTypeID(*result) == CFDataGetTypeID()) {
+                val = describeData((__bridge NSData *)*result);
+            }
+            appendLog([NSString stringWithFormat:@"[KC-read] %@ status=%d%@", a, (int)s, val]);
         }
     }
-    appendLog([NSString stringWithFormat:@"[KC-read] account=%@ status=%d%@", a, (int)s, val]);
     return s;
 }
 
@@ -102,17 +63,31 @@ static OSStatus (*orig_SecItemAdd)(CFDictionaryRef, CFTypeRef *);
 static OSStatus my_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     OSStatus s = orig_SecItemAdd(attributes, result);
     CFTypeRef acct = attributes ? CFDictionaryGetValue(attributes, kSecAttrAccount) : NULL;
-    NSString *a = (acct && CFGetTypeID(acct) == CFStringGetTypeID())
-        ? (__bridge NSString *)acct : @"(?)";
-
-    NSString *val = @"";
-    CFTypeRef data = attributes ? CFDictionaryGetValue(attributes, kSecValueData) : NULL;
-    if (data && CFGetTypeID(data) == CFDataGetTypeID()) {
-        NSString *str = [[NSString alloc] initWithData:(__bridge NSData *)data
-                                              encoding:NSUTF8StringEncoding];
-        val = str ? [NSString stringWithFormat:@" value=%@", str] : @" value=<binary>";
+    if (acct && CFGetTypeID(acct) == CFStringGetTypeID()) {
+        NSString *a = (__bridge NSString *)acct;
+        if ([a isEqualToString:kTargetAccount]) {
+            CFTypeRef data = CFDictionaryGetValue(attributes, kSecValueData);
+            NSString *val = (data && CFGetTypeID(data) == CFDataGetTypeID())
+                ? describeData((__bridge NSData *)data) : @" (no-data)";
+            appendLog([NSString stringWithFormat:@"[KC-WRITE] %@ status=%d%@", a, (int)s, val]);
+        }
     }
-    appendLog([NSString stringWithFormat:@"[KC-WRITE] account=%@ status=%d%@", a, (int)s, val]);
+    return s;
+}
+
+static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef, CFDictionaryRef);
+static OSStatus my_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
+    OSStatus s = orig_SecItemUpdate(query, attributesToUpdate);
+    CFTypeRef acct = query ? CFDictionaryGetValue(query, kSecAttrAccount) : NULL;
+    if (acct && CFGetTypeID(acct) == CFStringGetTypeID()) {
+        NSString *a = (__bridge NSString *)acct;
+        if ([a isEqualToString:kTargetAccount]) {
+            CFTypeRef data = CFDictionaryGetValue(attributesToUpdate, kSecValueData);
+            NSString *val = (data && CFGetTypeID(data) == CFDataGetTypeID())
+                ? describeData((__bridge NSData *)data) : @" (no-data)";
+            appendLog([NSString stringWithFormat:@"[KC-UPDATE] %@ status=%d%@", a, (int)s, val]);
+        }
+    }
     return s;
 }
 
@@ -158,22 +133,22 @@ static void setupOverlay(void) {
     vc.view.backgroundColor = UIColor.clearColor;
 
     CGRect b = vc.view.bounds;
-    CGFloat h = b.size.height * 0.35;
+    CGFloat h = b.size.height * 0.40;
 
     gLogView = [[UITextView alloc] initWithFrame:
         CGRectMake(0, b.size.height - h, b.size.width, h)];
     gLogView.editable = NO;
     gLogView.selectable = YES;
-    gLogView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+    gLogView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
     gLogView.textColor = UIColor.greenColor;
-    gLogView.font = [UIFont fontWithName:@"Menlo" size:11];
-    gLogView.text = gLogBuffer ?: @"[IOKit] hazır\n";
+    gLogView.font = [UIFont fontWithName:@"Menlo" size:10];
+    gLogView.text = gLogBuffer ?: @"[hazır] lm_new_device_deviceIdentifier izleniyor\n";
     [vc.view addSubview:gLogView];
 
     UIButton *toggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     toggleBtn.frame = CGRectMake(10, b.size.height - h - 36, 80, 30);
     [toggleBtn setTitle:@"Gizle/Aç" forState:UIControlStateNormal];
-    toggleBtn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+    toggleBtn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
     [toggleBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     [toggleBtn addTarget:IOKitLogOverlay.class action:@selector(toggleTapped)
         forControlEvents:UIControlEventTouchUpInside];
@@ -182,7 +157,7 @@ static void setupOverlay(void) {
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     copyBtn.frame = CGRectMake(b.size.width - 90, b.size.height - h - 36, 80, 30);
     [copyBtn setTitle:@"Kopyala" forState:UIControlStateNormal];
-    copyBtn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+    copyBtn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
     [copyBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     [copyBtn addTarget:IOKitLogOverlay.class action:@selector(copyTapped)
         forControlEvents:UIControlEventTouchUpInside];
@@ -195,29 +170,17 @@ static void setupOverlay(void) {
 
 __attribute__((constructor))
 static void init_logger(void) {
-    rebind_symbols((struct rebinding[5]){
-        {"IORegistryEntryCreateCFProperty",
-         my_IORegistryEntryCreateCFProperty,
-         (void *)&orig_IORegistryEntryCreateCFProperty},
-        {"IORegistryEntrySearchCFProperty",
-         my_IORegistryEntrySearchCFProperty,
-         (void *)&orig_IORegistryEntrySearchCFProperty},
-        {"IORegistryEntryCreateCFProperties",
-         my_IORegistryEntryCreateCFProperties,
-         (void *)&orig_IORegistryEntryCreateCFProperties},
+    rebind_symbols((struct rebinding[3]){
         {"SecItemCopyMatching",
          my_SecItemCopyMatching,
          (void *)&orig_SecItemCopyMatching},
         {"SecItemAdd",
          my_SecItemAdd,
-         (void *)&orig_SecItemAdd}
-    }, 5);
-
-    Method m = class_getInstanceMethod(UIDevice.class, @selector(identifierForVendor));
-    if (m) {
-        orig_idfv = (void *)method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_idfv);
-    }
+         (void *)&orig_SecItemAdd},
+        {"SecItemUpdate",
+         my_SecItemUpdate,
+         (void *)&orig_SecItemUpdate}
+    }, 3);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{ setupOverlay(); });
