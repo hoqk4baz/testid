@@ -1,6 +1,8 @@
 // iokit_logger.m
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <Security/Security.h>
+#import <objc/runtime.h>
 #import "fishhook.h"
 
 typedef unsigned int io_registry_entry_t;
@@ -22,46 +24,34 @@ static void appendLog(NSString *line) {
 
 #pragma mark - IOKit hooks
 
-// 1) IORegistryEntryCreateCFProperty (tekil anahtar)
 static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(
     io_registry_entry_t, CFStringRef, CFAllocatorRef, IOOptionBits);
-
 static CFTypeRef my_IORegistryEntryCreateCFProperty(
     io_registry_entry_t entry, CFStringRef key,
     CFAllocatorRef allocator, IOOptionBits options) {
     CFTypeRef result = orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
     NSString *k = key ? (__bridge NSString *)key : @"(null)";
-    NSString *v = @"(null)";
-    if (result && CFGetTypeID(result) == CFStringGetTypeID())
-        v = (__bridge NSString *)result;
-    else if (result)
-        v = @"<non-string CFType>";
+    NSString *v = (result && CFGetTypeID(result) == CFStringGetTypeID())
+        ? (__bridge NSString *)result : (result ? @"<non-string>" : @"(null)");
     appendLog([NSString stringWithFormat:@"[Create] %@ = %@", k, v]);
     return result;
 }
 
-// 2) IORegistryEntrySearchCFProperty (plane üzerinde arama)
 static CFTypeRef (*orig_IORegistryEntrySearchCFProperty)(
     io_registry_entry_t, const char *, CFStringRef, CFAllocatorRef, IOOptionBits);
-
 static CFTypeRef my_IORegistryEntrySearchCFProperty(
     io_registry_entry_t entry, const char *plane, CFStringRef key,
     CFAllocatorRef allocator, IOOptionBits options) {
     CFTypeRef result = orig_IORegistryEntrySearchCFProperty(entry, plane, key, allocator, options);
     NSString *k = key ? (__bridge NSString *)key : @"(null)";
-    NSString *v = @"(null)";
-    if (result && CFGetTypeID(result) == CFStringGetTypeID())
-        v = (__bridge NSString *)result;
-    else if (result)
-        v = @"<non-string CFType>";
+    NSString *v = (result && CFGetTypeID(result) == CFStringGetTypeID())
+        ? (__bridge NSString *)result : (result ? @"<non-string>" : @"(null)");
     appendLog([NSString stringWithFormat:@"[Search] %@ = %@", k, v]);
     return result;
 }
 
-// 3) IORegistryEntryCreateCFProperties (tüm sözlük)
 static kern_return_t (*orig_IORegistryEntryCreateCFProperties)(
     io_registry_entry_t, CFMutableDictionaryRef *, CFAllocatorRef, IOOptionBits);
-
 static kern_return_t my_IORegistryEntryCreateCFProperties(
     io_registry_entry_t entry, CFMutableDictionaryRef *props,
     CFAllocatorRef allocator, IOOptionBits options) {
@@ -77,13 +67,32 @@ static kern_return_t my_IORegistryEntryCreateCFProperties(
     return r;
 }
 
-#pragma mark - Passthrough window (dokunuşları alttaki uygulamaya geçirir)
+#pragma mark - identifierForVendor & keychain hooks
+
+static NSUUID *(*orig_idfv)(id, SEL);
+static NSUUID *my_idfv(id self, SEL _cmd) {
+    NSUUID *r = orig_idfv(self, _cmd);
+    appendLog([NSString stringWithFormat:@"[IDFV] %@", r.UUIDString]);
+    return r;
+}
+
+static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
+static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    OSStatus s = orig_SecItemCopyMatching(query, result);
+    CFTypeRef acct = query ? CFDictionaryGetValue(query, kSecAttrAccount) : NULL;
+    NSString *a = (acct && CFGetTypeID(acct) == CFStringGetTypeID())
+        ? (__bridge NSString *)acct : @"(?)";
+    appendLog([NSString stringWithFormat:@"[Keychain] read account=%@ status=%d", a, (int)s]);
+    return s;
+}
+
+#pragma mark - Passthrough window
 
 @interface PassthroughWindow : UIWindow @end
 @implementation PassthroughWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self.rootViewController.view) return nil; // boş alan -> alttaki uygulamaya geç
+    if (hit == self.rootViewController.view) return nil;
     return hit;
 }
 @end
@@ -94,14 +103,9 @@ static kern_return_t my_IORegistryEntryCreateCFProperties(
 + (void)copyTapped;
 + (void)toggleTapped;
 @end
-
 @implementation IOKitLogOverlay
-+ (void)copyTapped {
-    [UIPasteboard generalPasteboard].string = gLogBuffer ?: @"";
-}
-+ (void)toggleTapped {
-    gLogView.hidden = !gLogView.hidden;
-}
++ (void)copyTapped { [UIPasteboard generalPasteboard].string = gLogBuffer ?: @""; }
++ (void)toggleTapped { gLogView.hidden = !gLogView.hidden; }
 @end
 
 static void setupOverlay(void) {
@@ -161,7 +165,7 @@ static void setupOverlay(void) {
 
 __attribute__((constructor))
 static void init_logger(void) {
-    rebind_symbols((struct rebinding[3]){
+    rebind_symbols((struct rebinding[4]){
         {"IORegistryEntryCreateCFProperty",
          my_IORegistryEntryCreateCFProperty,
          (void *)&orig_IORegistryEntryCreateCFProperty},
@@ -170,8 +174,17 @@ static void init_logger(void) {
          (void *)&orig_IORegistryEntrySearchCFProperty},
         {"IORegistryEntryCreateCFProperties",
          my_IORegistryEntryCreateCFProperties,
-         (void *)&orig_IORegistryEntryCreateCFProperties}
-    }, 3);
+         (void *)&orig_IORegistryEntryCreateCFProperties},
+        {"SecItemCopyMatching",
+         my_SecItemCopyMatching,
+         (void *)&orig_SecItemCopyMatching}
+    }, 4);
+
+    Method m = class_getInstanceMethod(UIDevice.class, @selector(identifierForVendor));
+    if (m) {
+        orig_idfv = (void *)method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_idfv);
+    }
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{ setupOverlay(); });
