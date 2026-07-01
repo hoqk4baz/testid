@@ -6,13 +6,29 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-14   # iOS 26'da calisir; daha yeni SDK istersen macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Debug - repo icerigi
+        run: |
+          echo "=== workspace agaci ==="
+          ls -R "$GITHUB_WORKSPACE" | grep -v '/\.git/' | head -100
+
       - name: Clone fishhook
         run: git clone --depth 1 https://github.com/facebook/fishhook.git
+
+      - name: Kaynak dosyayi bul
+        id: findsrc
+        run: |
+          SRC=$(find "$GITHUB_WORKSPACE" -name 'logwindow.m' -not -path '*/fishhook/*' | head -1)
+          if [ -z "$SRC" ]; then
+            echo "HATA: logwindow.m bulunamadi. Repo koküne koydugundan emin ol."
+            exit 1
+          fi
+          echo "Bulundu: $SRC"
+          echo "src=$SRC" >> "$GITHUB_OUTPUT"
 
       - name: Build LogWindow.dylib
         run: |
@@ -29,7 +45,7 @@ jobs:
             -framework UIKit \
             -framework Security \
             -framework CoreFoundation \
-            fishhook/fishhook.c logwindow.m \
+            fishhook/fishhook.c "${{ steps.findsrc.outputs.src }}" \
             -o LogWindow.dylib
 
       - name: Ad-hoc codesign
