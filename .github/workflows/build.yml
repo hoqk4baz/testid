@@ -1,47 +1,46 @@
-# .github/workflows/build.yml
-name: build-iokit-logger
+name: build-dylib
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: List files
-        run: ls -la
+      - name: Clone fishhook
+        run: git clone --depth 1 https://github.com/facebook/fishhook.git
 
-      - name: Fetch fishhook
+      - name: Build LogWindow.dylib
         run: |
-          curl -fsSL -O https://raw.githubusercontent.com/facebook/fishhook/master/fishhook.c
-          curl -fsSL -O https://raw.githubusercontent.com/facebook/fishhook/master/fishhook.h
-
-      - name: Compile dylib
-        run: |
-          set -euo pipefail
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          clang -arch arm64 -dynamiclib -fobjc-arc \
+          echo "SDK: $SDK"
+          xcrun --sdk iphoneos clang \
+            -arch arm64 \
+            -dynamiclib \
+            -fobjc-arc \
             -isysroot "$SDK" \
-            -mios-version-min=15.0 \
+            -miphoneos-version-min=13.0 \
+            -Ifishhook \
+            -framework Foundation \
             -framework UIKit \
-            -framework CoreFoundation \
-            -framework IOKit \
             -framework Security \
-            -o iokit_logger.dylib \
-            iokit_logger.m fishhook.c
+            -framework CoreFoundation \
+            fishhook/fishhook.c logwindow.m \
+            -o LogWindow.dylib
 
-      - name: Ad-hoc sign
-        run: codesign -f -s - iokit_logger.dylib
+      - name: Ad-hoc codesign
+        run: |
+          codesign -f -s - LogWindow.dylib
+          codesign -dvvv LogWindow.dylib || true
+          otool -L LogWindow.dylib || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: iokit_logger
-          path: iokit_logger.dylib
+          name: LogWindow-dylib
+          path: LogWindow.dylib
           if-no-files-found: error
